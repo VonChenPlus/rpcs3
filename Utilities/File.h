@@ -1,37 +1,51 @@
 #pragma once
 
-enum class fsm : u32 // file seek mode
-{
-	begin,
-	cur,
-	end,
-};
+#include <memory>
+#include <string>
+#include <vector>
+#include <type_traits>
 
-namespace fom // file open mode
-{
-	enum : u32
-	{
-		read = 1 << 0, // enable reading
-		write = 1 << 1, // enable writing
-		append = 1 << 2, // enable appending (always write to the end of file)
-		create = 1 << 3, // create file if it doesn't exist
-		trunc = 1 << 4, // clear opened file if it's not empty
-		excl = 1 << 5, // failure if the file already exists (used with `create`)
-
-		rewrite = write | create | trunc, // write + create + trunc
-	};
-};
-
-enum class fse : u32 // filesystem (file or dir) error
-{
-	ok, // no error
-	invalid_arguments,
-};
+#include "types.h"
+#include "BitSet.h"
 
 namespace fs
 {
-	thread_local extern fse g_tls_error;
+	// Error code returned
+	extern thread_local uint error;
 
+	// File open mode flags
+	enum struct open_mode : u32
+	{
+		read,
+		write,
+		append,
+		create,
+		trunc,
+		excl,
+	};
+
+	constexpr bitset_t<open_mode> read    = open_mode::read; // Enable reading
+	constexpr bitset_t<open_mode> write   = open_mode::write; // Enable writing
+	constexpr bitset_t<open_mode> append  = open_mode::append; // Always append to the end of the file
+	constexpr bitset_t<open_mode> create  = open_mode::create; // Create file if it doesn't exist
+	constexpr bitset_t<open_mode> trunc   = open_mode::trunc; // Clear opened file if it's not empty
+	constexpr bitset_t<open_mode> excl    = open_mode::excl; // Failure if the file already exists (used with `create`)
+
+	constexpr bitset_t<open_mode> rewrite = write + create + trunc;
+
+	// File seek mode
+	enum class seek_mode : u32
+	{
+		seek_set,
+		seek_cur,
+		seek_end,
+	};
+
+	constexpr auto seek_set = seek_mode::seek_set; // From beginning
+	constexpr auto seek_cur = seek_mode::seek_cur; // From current position
+	constexpr auto seek_end = seek_mode::seek_end; // From end
+
+	// File attributes (TODO)
 	struct stat_t
 	{
 		bool is_directory;
@@ -42,6 +56,59 @@ namespace fs
 		s64 ctime;
 	};
 
+	// File handle base
+	struct file_base
+	{
+		virtual ~file_base() = default;
+
+		virtual stat_t stat() = 0;
+		virtual bool trunc(u64 length) = 0;
+		virtual u64 read(void* buffer, u64 size) = 0;
+		virtual u64 write(const void* buffer, u64 size) = 0;
+		virtual u64 seek(s64 offset, seek_mode whence) = 0;
+		virtual u64 size() = 0;
+	};
+
+	// Directory entry (TODO)
+	struct dir_entry : stat_t
+	{
+		std::string name;
+	};
+
+	// Directory handle base
+	struct dir_base
+	{
+		virtual ~dir_base() = default;
+
+		virtual bool read(dir_entry&) = 0;
+		virtual void rewind() = 0;
+	};
+
+	// Virtual device
+	struct device_base
+	{
+		virtual ~device_base() = default;
+
+		virtual bool stat(const std::string& path, stat_t& info) = 0;
+		virtual bool remove_dir(const std::string& path) = 0;
+		virtual bool create_dir(const std::string& path) = 0;
+		virtual bool rename(const std::string& from, const std::string& to) = 0;
+		virtual bool remove(const std::string& path) = 0;
+		virtual bool trunc(const std::string& path, u64 length) = 0;
+
+		virtual std::unique_ptr<file_base> open(const std::string& path, bitset_t<open_mode> mode) = 0;
+		virtual std::unique_ptr<dir_base> open_dir(const std::string& path) = 0;
+	};
+
+	// Get virtual device for specified path (nullptr for real path)
+	std::shared_ptr<device_base> get_virtual_device(const std::string& path);
+
+	// Set virtual device with specified name (nullptr for deletion)
+	std::shared_ptr<device_base> set_virtual_device(const std::string& root_name, const std::shared_ptr<device_base>&);
+
+	// Try to get parent directory (returns empty string on failure)
+	std::string get_parent_dir(const std::string& path);
+
 	// Get file information
 	bool stat(const std::string& path, stat_t& info);
 
@@ -49,16 +116,16 @@ namespace fs
 	bool exists(const std::string& path);
 
 	// Check whether the file exists and is NOT a directory
-	bool is_file(const std::string& file);
+	bool is_file(const std::string& path);
 
 	// Check whether the directory exists and is NOT a file
-	bool is_dir(const std::string& dir);
+	bool is_dir(const std::string& path);
 
 	// Delete empty directory
-	bool remove_dir(const std::string& dir);
+	bool remove_dir(const std::string& path);
 
 	// Create directory
-	bool create_dir(const std::string& dir);
+	bool create_dir(const std::string& path);
 
 	// Create directories
 	bool create_path(const std::string& path);
@@ -70,179 +137,299 @@ namespace fs
 	bool copy_file(const std::string& from, const std::string& to, bool overwrite);
 
 	// Delete file
-	bool remove_file(const std::string& file);
+	bool remove_file(const std::string& path);
 
 	// Change file size (possibly appending zeros)
-	bool truncate_file(const std::string& file, u64 length);
+	bool truncate_file(const std::string& path, u64 length);
 
 	class file final
 	{
-		using handle_type = std::intptr_t;
+		std::unique_ptr<file_base> m_file;
 
-		constexpr static handle_type null = -1;
-
-		handle_type m_fd = null;
-
-		friend class file_ptr;
+		[[noreturn]] void xnull() const;
+		[[noreturn]] void xfail() const;
 
 	public:
+		// Default constructor
 		file() = default;
 
-		explicit file(const std::string& filename, u32 mode = fom::read)
+		// Open file with specified mode
+		explicit file(const std::string& path, bitset_t<open_mode> mode = ::fs::read)
 		{
-			open(filename, mode);
+			open(path, mode);
 		}
 
-		file(file&& other)
-			: m_fd(other.m_fd)
-		{
-			other.m_fd = null;
-		}
+		// Open file with specified mode
+		bool open(const std::string& path, bitset_t<open_mode> mode = ::fs::read);
 
-		file& operator =(file&& right)
-		{
-			std::swap(m_fd, right.m_fd);
-			return *this;
-		}
-
-		~file();
-
-		// Check whether the handle is valid (opened file)
-		bool is_opened() const
-		{
-			return m_fd != null;
-		}
+		// Open memory for read
+		explicit file(const void* ptr, std::size_t size);
 
 		// Check whether the handle is valid (opened file)
 		explicit operator bool() const
 		{
-			return is_opened();
+			return m_file.operator bool();
 		}
 
-		// Open specified file with specified mode
-		bool open(const std::string& filename, u32 mode = fom::read);
+		// Close the file explicitly
+		void close()
+		{
+			m_file.reset();
+		}
+
+		void reset(std::unique_ptr<file_base>&& ptr)
+		{
+			m_file = std::move(ptr);
+		}
+
+		std::unique_ptr<file_base> release()
+		{
+			return std::move(m_file);
+		}
 
 		// Change file size (possibly appending zero bytes)
-		bool trunc(u64 size) const;
+		bool trunc(u64 length) const
+		{
+			if (!m_file) xnull();
+			return m_file->trunc(length);
+		}
 
 		// Get file information
-		bool stat(stat_t& info) const;
-
-		// Close the file explicitly (destructor automatically closes the file)
-		bool close();
+		stat_t stat() const
+		{
+			if (!m_file) xnull();
+			return m_file->stat();
+		}
 
 		// Read the data from the file and return the amount of data written in buffer
-		u64 read(void* buffer, u64 count) const;
+		u64 read(void* buffer, u64 count) const
+		{
+			if (!m_file) xnull();
+			return m_file->read(buffer, count);
+		}
 
 		// Write the data to the file and return the amount of data actually written
-		u64 write(const void* buffer, u64 count) const;
+		u64 write(const void* buffer, u64 count) const
+		{
+			if (!m_file) xnull();
+			return m_file->write(buffer, count);
+		}
 
-		// Move file pointer
-		u64 seek(s64 offset, fsm seek_mode = fsm::begin) const;
+		// Change current position, returns resulting position
+		u64 seek(s64 offset, seek_mode whence = seek_set) const
+		{
+			if (!m_file) xnull();
+			return m_file->seek(offset, whence);
+		}
 
 		// Get file size
-		u64 size() const;
-
-		// Write std::string
-		const file& operator <<(const std::string& str) const
+		u64 size() const
 		{
-			CHECK_ASSERTION(write(str.data(), str.size()) == str.size());
-			return *this;
-		}
-	};
-
-	class file_ptr final
-	{
-		char* m_ptr = nullptr;
-		u64 m_size;
-
-	public:
-		file_ptr() = default;
-
-		file_ptr(file_ptr&& right)
-			: m_ptr(right.m_ptr)
-			, m_size(right.m_size)
-		{
-			right.m_ptr = 0;
+			if (!m_file) xnull();
+			return m_file->size();
 		}
 
-		file_ptr& operator =(file_ptr&& right)
+		// Get current position
+		u64 pos() const
 		{
-			std::swap(m_ptr, right.m_ptr);
-			std::swap(m_size, right.m_size);
+			if (!m_file) xnull();
+			return m_file->seek(0, seek_cur);
+		}
+
+		// Write std::string unconditionally
+		const file& write(const std::string& str) const
+		{
+			if (write(str.data(), str.size()) != str.size()) xfail();
 			return *this;
 		}
 
-		file_ptr(const file& f)
+		// Write POD unconditionally
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, const file&> write(const T& data) const
 		{
-			reset(f);
+			if (write(std::addressof(data), sizeof(T)) != sizeof(T)) xfail();
+			return *this;
 		}
 
-		~file_ptr()
+		// Write POD std::vector unconditionally
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, const file&> write(const std::vector<T>& vec) const
 		{
-			reset();
+			if (write(vec.data(), vec.size() * sizeof(T)) != vec.size() * sizeof(T)) xfail();
+			return *this;
 		}
 
-		// Open file mapping
-		void reset(const file& f);
-		
-		// Close file mapping
-		void reset();
-
-		// Get pointer
-		operator char*() const
+		// Read std::string, size must be set by resize() method
+		bool read(std::string& str) const
 		{
-			return m_ptr;
+			return read(&str[0], str.size()) == str.size();
+		}
+
+		// Read POD, sizeof(T) is used
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, bool> read(T& data) const
+		{
+			return read(&data, sizeof(T)) == sizeof(T);
+		}
+
+		// Read POD std::vector, size must be set by resize() method
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, bool> read(std::vector<T>& vec) const
+		{
+			return read(vec.data(), sizeof(T) * vec.size()) == sizeof(T) * vec.size();
+		}
+
+		// Read POD (experimental)
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, T> read() const
+		{
+			T result;
+			if (!read(result)) xfail();
+			return result;
+		}
+
+		// Read full file to std::string
+		std::string to_string() const
+		{
+			std::string result;
+			result.resize(size());
+			if (seek(0), !read(result)) xfail();
+			return result;
+		}
+
+		// Read full file to std::vector
+		template<typename T>
+		std::enable_if_t<std::is_pod<T>::value && !std::is_pointer<T>::value, std::vector<T>> to_vector() const
+		{
+			std::vector<T> result;
+			result.resize(size() / sizeof(T));
+			if (seek(0), !read(result)) xfail();
+			return result;
 		}
 	};
 
 	class dir final
 	{
-		std::unique_ptr<char[]> m_path;
-		std::intptr_t m_dd; // handle (aux)
+		std::unique_ptr<dir_base> m_dir;
+
+		[[noreturn]] void xnull() const;
 
 	public:
 		dir() = default;
 
-		explicit dir(const std::string& dirname)
+		// Open dir handle
+		explicit dir(const std::string& path)
 		{
-			open(dirname);
+			open(path);
 		}
 
-		dir(dir&& other)
-			: m_dd(other.m_dd)
-			, m_path(std::move(other.m_path))
-		{
-		}
-
-		dir& operator =(dir&& right)
-		{
-			std::swap(m_dd, right.m_dd);
-			std::swap(m_path, right.m_path);
-			return *this;
-		}
-
-		~dir();
-
-		// Check whether the handle is valid (opened directory)
-		bool is_opened() const
-		{
-			return m_path.operator bool();
-		}
+		// Open specified directory
+		bool open(const std::string& path);
 
 		// Check whether the handle is valid (opened directory)
 		explicit operator bool() const
 		{
-			return is_opened();
+			return m_dir.operator bool();
 		}
 
-		// Open specified directory
-		bool open(const std::string& dirname);
-		
-		// Close the directory explicitly (destructor automatically closes the directory)
-		bool close();
+		// Close the directory explicitly
+		void close()
+		{
+			m_dir.reset();
+		}
 
-		// Get next directory entry (UTF-8 name and file stat)
-		bool read(std::string& name, stat_t& info);
+		void reset(std::unique_ptr<dir_base>&& ptr)
+		{
+			m_dir = std::move(ptr);
+		}
+		
+		std::unique_ptr<dir_base> release()
+		{
+			return std::move(m_dir);
+		}
+
+		// Get next directory entry
+		bool read(dir_entry& out) const
+		{
+			if (!m_dir) xnull();
+			return m_dir->read(out);
+		}
+
+		// Reset to the beginning
+		void rewind() const
+		{
+			if (!m_dir) xnull();
+			return m_dir->rewind();
+		}
+
+		class iterator
+		{
+			dir* m_parent;
+			dir_entry m_entry;
+
+		public:
+			enum class mode
+			{
+				from_first,
+				from_current
+			};
+
+			iterator(dir* parent, mode mode_ = mode::from_first)
+				: m_parent(parent)
+			{
+				if (!m_parent)
+				{
+					return;
+				}
+
+				if (mode_ == mode::from_first)
+				{
+					m_parent->rewind();
+				}
+
+				if (!m_parent->read(m_entry))
+				{
+					m_parent = nullptr;
+				}
+			}
+
+			dir_entry& operator *()
+			{
+				return m_entry;
+			}
+
+			iterator& operator++()
+			{
+				*this = { m_parent, mode::from_current };
+				return *this;
+			}
+
+			bool operator !=(const iterator& rhs) const
+			{
+				return m_parent != rhs.m_parent;
+			}
+		};
+
+		iterator begin()
+		{
+			return{ m_dir ? this : nullptr };
+		}
+
+		iterator end()
+		{
+			return{ nullptr };
+		}
 	};
+
+	// Get configuration directory
+	const std::string& get_config_dir();
+
+	// Get executable directory
+	const std::string& get_executable_dir();
+
+	// Delete directory and all its contents recursively
+	void remove_all(const std::string& path);
+
+	// Get size of all files recursively
+	u64 get_dir_size(const std::string& path);
 }

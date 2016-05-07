@@ -4,8 +4,6 @@
 #include "Gui/ConLogFrame.h"
 #include "Gui/FrameBase.h"
 
-#include <wx/aui/aui.h>
-
 class GameViewer;
 
 class MainFrame : public FrameBase
@@ -40,7 +38,6 @@ private:
 	void ConfigVHDD(wxCommandEvent& event);
 	void ConfigAutoPause(wxCommandEvent& event);
 	void ConfigSaveData(wxCommandEvent& event);
-	void ConfigLLEModules(wxCommandEvent& event);
 	void OpenELFCompiler(wxCommandEvent& evt);
 	void OpenKernelExplorer(wxCommandEvent& evt);
 	void OpenMemoryViewer(wxCommandEvent& evt);

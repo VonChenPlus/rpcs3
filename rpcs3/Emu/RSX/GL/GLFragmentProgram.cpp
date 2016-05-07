@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "GLFragmentProgram.h"
@@ -30,6 +29,13 @@ std::string GLFragmentDecompilerThread::compareFunction(COMPARE f, const std::st
 void GLFragmentDecompilerThread::insertHeader(std::stringstream & OS)
 {
 	OS << "#version 420" << std::endl;
+
+	OS << "layout(std140, binding = 0) uniform ScaleOffsetBuffer\n";
+	OS << "{\n";
+	OS << "	mat4 scaleOffsetMat;\n";
+	OS << "	float fog_param0;\n";
+	OS << "	float fog_param1;\n";
+	OS << "};\n";
 }
 
 void GLFragmentDecompilerThread::insertIntputs(std::stringstream & OS)
@@ -37,7 +43,13 @@ void GLFragmentDecompilerThread::insertIntputs(std::stringstream & OS)
 	for (const ParamType& PT : m_parr.params[PF_PARAM_IN])
 	{
 		for (const ParamItem& PI : PT.items)
-			OS << "in " << PT.type << " " << PI.name << ";" << std::endl;
+		{
+			//Rename fogc to fog_c to differentiate the input register from the variable
+			if (PI.name == "fogc")
+				OS << "in vec4 fog_c;" << std::endl;
+			else
+				OS << "in " << PT.type << " " << PI.name << ";" << std::endl;
+		}
 	}
 }
 
@@ -62,29 +74,76 @@ void GLFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 {
 	for (const ParamType& PT : m_parr.params[PF_PARAM_UNIFORM])
 	{
-		if (PT.type != "sampler2D")
+		if (PT.type != "sampler1D" &&
+			PT.type != "sampler2D" &&
+			PT.type != "sampler3D" &&
+			PT.type != "samplerCube")
 			continue;
-		for (const ParamItem& PI : PT.items)
-			OS << "uniform " << PT.type << " " << PI.name << ";" << std::endl;
 
+		for (const ParamItem& PI : PT.items)
+		{
+			std::string samplerType = PT.type;
+			int index = atoi(&PI.name.data()[3]);
+
+			OS << "uniform " << samplerType << " " << PI.name << ";" << std::endl;
+		}
 	}
 
 	OS << "layout(std140, binding = 2) uniform FragmentConstantsBuffer" << std::endl;
 	OS << "{" << std::endl;
+
 	for (const ParamType& PT : m_parr.params[PF_PARAM_UNIFORM])
 	{
-		if (PT.type == "sampler2D")
+		if (PT.type == "sampler1D" ||
+			PT.type == "sampler2D" ||
+			PT.type == "sampler3D" ||
+			PT.type == "samplerCube")
 			continue;
+
 		for (const ParamItem& PI : PT.items)
-			OS << "	 " << PT.type << " " << PI.name << ";" << std::endl;
+			OS << "	" << PT.type << " " << PI.name << ";" << std::endl;
 	}
+
 	// A dummy value otherwise it's invalid to create an empty uniform buffer
 	OS << "	vec4 void_value;" << std::endl;
 	OS << "};" << std::endl;
 }
 
+
+namespace
+{
+	// Note: It's not clear whether fog is computed per pixel or per vertex.
+	// But it makes more sense to compute exp of interpoled value than to interpolate exp values.
+	void insert_fog_declaration(std::stringstream & OS, rsx::fog_mode mode)
+	{
+		switch (mode)
+		{
+		case rsx::fog_mode::linear:
+			OS << "	vec4 fogc = vec4(fog_param1 * fog_c.x + (fog_param0 - 1.), fog_param1 * fog_c.x + (fog_param0 - 1.), 0., 0.);\n";
+			return;
+		case rsx::fog_mode::exponential:
+			OS << "	vec4 fogc = vec4(11.084 * (fog_param1 * fog_c.x + fog_param0 - 1.5), exp(11.084 * (fog_param1 * fog_c.x + fog_param0 - 1.5)), 0., 0.);\n";
+			return;
+		case rsx::fog_mode::exponential2:
+			OS << "	vec4 fogc = vec4(4.709 * (fog_param1 * fog_c.x + fog_param0 - 1.5), exp(-pow(4.709 * (fog_param1 * fog_c.x + fog_param0 - 1.5)), 2.), 0., 0.);\n";
+			return;
+		case rsx::fog_mode::linear_abs:
+			OS << "	vec4 fogc = vec4(fog_param1 * abs(fog_c.x) + (fog_param0 - 1.), fog_param1 * abs(fog_c.x) + (fog_param0 - 1.), 0., 0.);\n";
+			return;
+		case rsx::fog_mode::exponential_abs:
+			OS << "	vec4 fogc = vec4(11.084 * (fog_param1 * abs(fog_c.x) + fog_param0 - 1.5), exp(11.084 * (fog_param1 * abs(fog_c.x) + fog_param0 - 1.5)), 0., 0.);\n";
+			return;
+		case rsx::fog_mode::exponential2_abs:
+			OS << "	vec4 fogc = vec4(4.709 * (fog_param1 * abs(fog_c.x) + fog_param0 - 1.5), exp(-pow(4.709 * (fog_param1 * abs(fog_c.x) + fog_param0 - 1.5)), 2.), 0., 0.);\n";
+			return;
+		}
+	}
+}
+
 void GLFragmentDecompilerThread::insertMainStart(std::stringstream & OS)
 {
+	insert_glsl_legacy_function(OS);
+
 	OS << "void main ()" << std::endl;
 	OS << "{" << std::endl;
 
@@ -96,6 +155,42 @@ void GLFragmentDecompilerThread::insertMainStart(std::stringstream & OS)
 			if (!PI.value.empty())
 				OS << " = " << PI.value;
 			OS << ";" << std::endl;
+		}
+	}
+
+	OS << "	vec4 ssa = gl_FrontFacing ? vec4(1.) : vec4(-1.);\n";
+
+	for (const ParamType& PT : m_parr.params[PF_PARAM_UNIFORM])
+	{
+		if (PT.type != "sampler2D")
+			continue;
+
+		for (const ParamItem& PI : PT.items)
+		{
+			std::string samplerType = PT.type;
+			int index = atoi(&PI.name.data()[3]);
+
+			if (m_prog.unnormalized_coords & (1 << index))
+			{
+				OS << "vec2 tex" << index << "_coord_scale = 1. / textureSize(" << PI.name << ", 0);\n";
+			}
+			else
+			{
+				OS << "vec2 tex" << index << "_coord_scale = vec2(1.);\n";
+			}
+		}
+	}
+
+	// search if there is fogc in inputs
+	for (const ParamType& PT : m_parr.params[PF_PARAM_IN])
+	{
+		for (const ParamItem& PI : PT.items)
+		{
+			if (PI.name == "fogc")
+			{
+				insert_fog_declaration(OS, m_prog.fog_equation);
+				return;
+			}
 		}
 	}
 }
@@ -117,7 +212,17 @@ void GLFragmentDecompilerThread::insertMainEnd(std::stringstream & OS)
 	}
 
 	if (m_ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
-		OS << ((m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS) ? "\tgl_FragDepth = r1.z;\n" : "\tgl_FragDepth = h0.z;\n") << std::endl;
+	{
+		{
+			/** Note: Naruto Shippuden : Ultimate Ninja Storm 2 sets CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS in a shader
+			* but it writes depth in r1.z and not h2.z.
+			* Maybe there's a different flag for depth ?
+			*/
+			//OS << ((m_ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS) ? "\tgl_FragDepth = r1.z;\n" : "\tgl_FragDepth = h0.z;\n") << std::endl;
+			OS << "	gl_FragDepth = r1.z;\n";
+		}
+	}
+
 
 	OS << "}" << std::endl;
 }
@@ -156,9 +261,10 @@ GLFragmentProgram::~GLFragmentProgram()
 //	}
 //}
 
-void GLFragmentProgram::Decompile(RSXFragmentProgram& prog, const std::vector<texture_dimension> &td)
+void GLFragmentProgram::Decompile(const RSXFragmentProgram& prog)
 {
-	GLFragmentDecompilerThread decompiler(shader, parr, prog.addr, prog.size, prog.ctrl, td);
+	u32 size;
+	GLFragmentDecompilerThread decompiler(shader, parr, prog, size);
 	decompiler.Task();
 	for (const ParamType& PT : decompiler.m_parr.params[PF_PARAM_UNIFORM])
 	{
@@ -200,7 +306,7 @@ void GLFragmentProgram::Compile()
 	id = glCreateShader(GL_FRAGMENT_SHADER);
 
 	const char* str = shader.c_str();
-	const int strlen = shader.length();
+	const int strlen = ::narrow<int>(shader.length());
 
 	glShaderSource(id, 1, &str, &strlen);
 	glCompileShader(id);

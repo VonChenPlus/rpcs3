@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
 
 #include "VertexProgramDecompiler.h"
@@ -48,7 +47,7 @@ std::string VertexProgramDecompiler::GetDST(bool isSca)
 
 	default:
 		if (d3.dst > 15)
-			LOG_ERROR(RSX, fmt::format("dst index out of range: %u", d3.dst));
+			LOG_ERROR(RSX, "dst index out of range: %u", d3.dst);
 		ret += m_parr.AddParam(PF_PARAM_NONE, getFloatTypeName(4), std::string("dst_reg") + std::to_string(d3.dst), d3.dst == 0 ? getFloatTypeName(4) + "(0.0f, 0.0f, 0.0f, 1.0f)" : getFloatTypeName(4) + "(0.0, 0.0, 0.0, 0.0)");
 		break;
 	}
@@ -92,7 +91,7 @@ std::string VertexProgramDecompiler::GetSRC(const u32 n)
 		break;
 
 	default:
-		LOG_ERROR(RSX, fmt::format("Bad src%u reg type: %d", n, u32{ src[n].reg_type }));
+		LOG_ERROR(RSX, "Bad src%u reg type: %d", n, u32{ src[n].reg_type });
 		Emu.Pause();
 		break;
 	}
@@ -396,7 +395,6 @@ std::string VertexProgramDecompiler::BuildCode()
 	{
 		lvl -= m_instructions[i].close_scopes;
 		if (lvl < 1) lvl = 1;
-		//assert(lvl >= 1);
 		for (int j = 0; j < m_instructions[i].put_close_scopes; ++j)
 		{
 			--lvl;
@@ -436,8 +434,8 @@ std::string VertexProgramDecompiler::BuildCode()
 	return OS.str();
 }
 
-VertexProgramDecompiler::VertexProgramDecompiler(std::vector<u32>& data) :
-	m_data(data)
+VertexProgramDecompiler::VertexProgramDecompiler(const RSXVertexProgram& prog) :
+	m_data(prog.data)
 {
 	m_funcs.emplace_back();
 	m_funcs[0].offset = 0;
@@ -563,10 +561,10 @@ std::string VertexProgramDecompiler::Decompile()
 		case RSX_SCA_OPCODE_MOV: SetDSTSca("$s"); break;
 		case RSX_SCA_OPCODE_RCP: SetDSTSca("(1.0 / $s)"); break;
 		case RSX_SCA_OPCODE_RCC: SetDSTSca("clamp(1.0 / $s, 5.42101e-20, 1.884467e19)"); break;
-		case RSX_SCA_OPCODE_RSQ: SetDSTSca("(1.f / sqrt($s))"); break;
+		case RSX_SCA_OPCODE_RSQ: SetDSTSca("rsq_legacy($s)"); break;
 		case RSX_SCA_OPCODE_EXP: SetDSTSca("exp($s)"); break;
 		case RSX_SCA_OPCODE_LOG: SetDSTSca("log($s)"); break;
-		case RSX_SCA_OPCODE_LIT: SetDSTSca(getFloatTypeName(4) + "(1.0, $s.x, ($s.x > 0.0 ? exp($s.w * log2($s.y)) : 0.0), 1.0)"); break;
+		case RSX_SCA_OPCODE_LIT: SetDSTSca("lit_legacy($s)"); break;
 		case RSX_SCA_OPCODE_BRA:
 		{
 			AddCode("$if ($cond)");
@@ -620,7 +618,7 @@ std::string VertexProgramDecompiler::Decompile()
 			// works like BRI but shorter (RET o[1].x(TR);)
 			AddCode("$ifcond return;");
 			break;
-		case RSX_SCA_OPCODE_LG2: SetDSTSca("log2($s)"); break;
+		case RSX_SCA_OPCODE_LG2: SetDSTSca("log2_legacy($s)"); break;
 		case RSX_SCA_OPCODE_EX2: SetDSTSca("exp2($s)"); break;
 		case RSX_SCA_OPCODE_SIN: SetDSTSca("sin($s)"); break;
 		case RSX_SCA_OPCODE_COS: SetDSTSca("cos($s)"); break;

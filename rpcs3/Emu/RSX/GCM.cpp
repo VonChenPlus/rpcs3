@@ -704,7 +704,291 @@ namespace
 		{ NV4097_SET_VERTEX_ATTRIB_INPUT_MASK, "NV4097_SET_VERTEX_ATTRIB_INPUT_MASK" },
 		{ NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK, "NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK" },
 		{ NV4097_SET_TRANSFORM_BRANCH_BITS, "NV4097_SET_TRANSFORM_BRANCH_BITS" },
+		{ NV3062_SET_OBJECT, "NV3062_SET_OBJECT" },
+		{ NV3062_SET_CONTEXT_DMA_NOTIFIES, "NV3062_SET_CONTEXT_DMA_NOTIFIES" },
+		{ NV3062_SET_CONTEXT_DMA_IMAGE_SOURCE, "NV3062_SET_CONTEXT_DMA_IMAGE_SOURCE" },
+		{ NV3062_SET_CONTEXT_DMA_IMAGE_DESTIN, "NV3062_SET_CONTEXT_DMA_IMAGE_DESTIN" },
+		{ NV3062_SET_COLOR_FORMAT, "NV3062_SET_COLOR_FORMAT" },
+		{ NV3062_SET_PITCH, "NV3062_SET_PITCH" },
+		{ NV3062_SET_OFFSET_SOURCE, "NV3062_SET_OFFSET_SOURCE" },
+		{ NV3062_SET_OFFSET_DESTIN, "NV3062_SET_OFFSET_DESTIN" },
+		{ NV308A_POINT, "NV308A_POINT" },
+		{ NV308A_SIZE_OUT, "NV308A_SIZE_OUT" },
+		{ NV308A_SIZE_IN, "NV308A_SIZE_IN" },
+		{ NV308A_COLOR, "NV308A_COLOR" },
 	};
+}
+
+rsx::vertex_base_type rsx::to_vertex_base_type(u8 in)
+{
+	switch (in)
+	{
+	case 1: return rsx::vertex_base_type::s1;
+	case 2: return rsx::vertex_base_type::f;
+	case 3: return rsx::vertex_base_type::sf;
+	case 4: return rsx::vertex_base_type::ub;
+	case 5: return rsx::vertex_base_type::s32k;
+	case 6: return rsx::vertex_base_type::cmp;
+	case 7: return rsx::vertex_base_type::ub256;
+	}
+	throw EXCEPTION("Unknow vertex base type %d", in);
+}
+
+rsx::index_array_type rsx::to_index_array_type(u8 in)
+{
+	switch (in)
+	{
+	case 0: return rsx::index_array_type::u32;
+	case 1: return rsx::index_array_type::u16;
+	}
+	throw EXCEPTION("Unknown index array type %d", in);
+}
+
+rsx::primitive_type rsx::to_primitive_type(u8 in)
+{
+	switch (in)
+	{
+	case 1: return rsx::primitive_type::points;
+	case 2: return rsx::primitive_type::lines;
+	case 3: return rsx::primitive_type::line_loop;
+	case 4: return rsx::primitive_type::line_strip;
+	case 5: return rsx::primitive_type::triangles;
+	case 6: return rsx::primitive_type::triangle_strip;
+	case 7: return rsx::primitive_type::triangle_fan;
+	case 8: return rsx::primitive_type::quads;
+	case 9: return rsx::primitive_type::quad_strip;
+	case 10: return rsx::primitive_type::polygon;
+	}
+	throw EXCEPTION("Unknow primitive type %d", in);
+}
+
+enum
+{
+	CELL_GCM_WINDOW_ORIGIN_TOP = 0,
+	CELL_GCM_WINDOW_ORIGIN_BOTTOM = 1,
+	CELL_GCM_WINDOW_PIXEL_CENTER_HALF = 0,
+	CELL_GCM_WINDOW_PIXEL_CENTER_INTEGER = 1,
+};
+
+rsx::window_origin rsx::to_window_origin(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_WINDOW_ORIGIN_TOP: return rsx::window_origin::top;
+	case CELL_GCM_WINDOW_ORIGIN_BOTTOM: return rsx::window_origin::bottom;
+	}
+	throw EXCEPTION("Unknow window origin modifier %x", in);
+}
+
+rsx::window_pixel_center rsx::to_window_pixel_center(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_WINDOW_PIXEL_CENTER_HALF: return rsx::window_pixel_center::half;
+	case CELL_GCM_WINDOW_PIXEL_CENTER_INTEGER: return rsx::window_pixel_center::integer;
+	}
+	throw EXCEPTION("Unknow window pixel center %x", in);
+}
+
+rsx::comparaison_function rsx::to_comparaison_function(u16 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_NEVER: return rsx::comparaison_function::never;
+	case CELL_GCM_LESS: return rsx::comparaison_function::less;
+	case CELL_GCM_EQUAL: return rsx::comparaison_function::equal;
+	case CELL_GCM_LEQUAL: return rsx::comparaison_function::less_or_equal;
+	case CELL_GCM_GREATER: return rsx::comparaison_function::greater;
+	case CELL_GCM_NOTEQUAL: return rsx::comparaison_function::not_equal;
+	case CELL_GCM_GEQUAL: return rsx::comparaison_function::greater_or_equal;
+	case CELL_GCM_ALWAYS: return rsx::comparaison_function::always;
+	}
+	throw EXCEPTION("Wrong comparaison function %x", in);
+}
+
+enum
+{
+	CELL_GCM_FOG_MODE_LINEAR = 0x2601,
+	CELL_GCM_FOG_MODE_EXP = 0x0800,
+	CELL_GCM_FOG_MODE_EXP2 = 0x0801,
+	CELL_GCM_FOG_MODE_EXP_ABS = 0x0802,
+	CELL_GCM_FOG_MODE_EXP2_ABS = 0x0803,
+	CELL_GCM_FOG_MODE_LINEAR_ABS = 0x0804,
+};
+
+rsx::fog_mode rsx::to_fog_mode(u32 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_FOG_MODE_LINEAR: return rsx::fog_mode::linear;
+	case CELL_GCM_FOG_MODE_EXP: return rsx::fog_mode::exponential;
+	case CELL_GCM_FOG_MODE_EXP2: return rsx::fog_mode::exponential2;
+	case CELL_GCM_FOG_MODE_EXP_ABS: return rsx::fog_mode::exponential_abs;
+	case CELL_GCM_FOG_MODE_EXP2_ABS: return rsx::fog_mode::exponential2_abs;
+	case CELL_GCM_FOG_MODE_LINEAR_ABS: return rsx::fog_mode::linear_abs;
+	}
+	throw EXCEPTION("Wrong fog mode %x", in);
+}
+
+rsx::texture_dimension rsx::to_texture_dimension(u8 in)
+{
+	switch (in)
+	{
+	case 1: return rsx::texture_dimension::dimension1d;
+	case 2: return rsx::texture_dimension::dimension2d;
+	case 3: return rsx::texture_dimension::dimension3d;
+	}
+	throw EXCEPTION("Wrong texture dimension %d", in);
+}
+
+enum
+{
+	// Surface Target
+	CELL_GCM_SURFACE_TARGET_NONE = 0,
+	CELL_GCM_SURFACE_TARGET_0 = 1,
+	CELL_GCM_SURFACE_TARGET_1 = 2,
+	CELL_GCM_SURFACE_TARGET_MRT1 = 0x13,
+	CELL_GCM_SURFACE_TARGET_MRT2 = 0x17,
+	CELL_GCM_SURFACE_TARGET_MRT3 = 0x1f,
+
+	// Surface Depth
+	CELL_GCM_SURFACE_Z16 = 1,
+	CELL_GCM_SURFACE_Z24S8 = 2,
+
+	// Surface Antialias
+	CELL_GCM_SURFACE_CENTER_1 = 0,
+	CELL_GCM_SURFACE_DIAGONAL_CENTERED_2 = 3,
+	CELL_GCM_SURFACE_SQUARE_CENTERED_4 = 4,
+	CELL_GCM_SURFACE_SQUARE_ROTATED_4 = 5,
+
+	// Surface format
+	CELL_GCM_SURFACE_X1R5G5B5_Z1R5G5B5 = 1,
+	CELL_GCM_SURFACE_X1R5G5B5_O1R5G5B5 = 2,
+	CELL_GCM_SURFACE_R5G6B5 = 3,
+	CELL_GCM_SURFACE_X8R8G8B8_Z8R8G8B8 = 4,
+	CELL_GCM_SURFACE_X8R8G8B8_O8R8G8B8 = 5,
+	CELL_GCM_SURFACE_A8R8G8B8 = 8,
+	CELL_GCM_SURFACE_B8 = 9,
+	CELL_GCM_SURFACE_G8B8 = 10,
+	CELL_GCM_SURFACE_F_W16Z16Y16X16 = 11,
+	CELL_GCM_SURFACE_F_W32Z32Y32X32 = 12,
+	CELL_GCM_SURFACE_F_X32 = 13,
+	CELL_GCM_SURFACE_X8B8G8R8_Z8B8G8R8 = 14,
+	CELL_GCM_SURFACE_X8B8G8R8_O8B8G8R8 = 15,
+	CELL_GCM_SURFACE_A8B8G8R8 = 16,
+
+	// Wrap
+	CELL_GCM_TEXTURE_WRAP = 1,
+	CELL_GCM_TEXTURE_MIRROR = 2,
+	CELL_GCM_TEXTURE_CLAMP_TO_EDGE = 3,
+	CELL_GCM_TEXTURE_BORDER = 4,
+	CELL_GCM_TEXTURE_CLAMP = 5,
+	CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP_TO_EDGE = 6,
+	CELL_GCM_TEXTURE_MIRROR_ONCE_BORDER = 7,
+	CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP = 8,
+
+	// Max Anisotropy
+	CELL_GCM_TEXTURE_MAX_ANISO_1 = 0,
+	CELL_GCM_TEXTURE_MAX_ANISO_2 = 1,
+	CELL_GCM_TEXTURE_MAX_ANISO_4 = 2,
+	CELL_GCM_TEXTURE_MAX_ANISO_6 = 3,
+	CELL_GCM_TEXTURE_MAX_ANISO_8 = 4,
+	CELL_GCM_TEXTURE_MAX_ANISO_10 = 5,
+	CELL_GCM_TEXTURE_MAX_ANISO_12 = 6,
+	CELL_GCM_TEXTURE_MAX_ANISO_16 = 7,
+
+	// Texture Filter
+	CELL_GCM_TEXTURE_NEAREST = 1,
+	CELL_GCM_TEXTURE_LINEAR = 2,
+	CELL_GCM_TEXTURE_NEAREST_NEAREST = 3,
+	CELL_GCM_TEXTURE_LINEAR_NEAREST = 4,
+	CELL_GCM_TEXTURE_NEAREST_LINEAR = 5,
+	CELL_GCM_TEXTURE_LINEAR_LINEAR = 6,
+	CELL_GCM_TEXTURE_CONVOLUTION_MIN = 7,
+	CELL_GCM_TEXTURE_CONVOLUTION_MAG = 4,
+};
+
+rsx::texture_wrap_mode rsx::to_texture_wrap_mode(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_TEXTURE_WRAP: return rsx::texture_wrap_mode::wrap;
+	case CELL_GCM_TEXTURE_MIRROR: return rsx::texture_wrap_mode::mirror;
+	case CELL_GCM_TEXTURE_CLAMP_TO_EDGE: return rsx::texture_wrap_mode::clamp_to_edge;
+	case CELL_GCM_TEXTURE_BORDER: return rsx::texture_wrap_mode::border;
+	case CELL_GCM_TEXTURE_CLAMP: return rsx::texture_wrap_mode::clamp;
+	case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP_TO_EDGE: return rsx::texture_wrap_mode::mirror_once_clamp_to_edge;
+	case CELL_GCM_TEXTURE_MIRROR_ONCE_BORDER: return rsx::texture_wrap_mode::mirror_once_border;
+	case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP: return rsx::texture_wrap_mode::mirror_once_clamp;
+	}
+	throw EXCEPTION("Unknow wrap mode %x", in);
+}
+
+rsx::texture_max_anisotropy rsx::to_texture_max_anisotropy(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_TEXTURE_MAX_ANISO_1: return rsx::texture_max_anisotropy::x1;
+	case CELL_GCM_TEXTURE_MAX_ANISO_2: return rsx::texture_max_anisotropy::x2;
+	case CELL_GCM_TEXTURE_MAX_ANISO_4: return rsx::texture_max_anisotropy::x4;
+	case CELL_GCM_TEXTURE_MAX_ANISO_6: return rsx::texture_max_anisotropy::x6;
+	case CELL_GCM_TEXTURE_MAX_ANISO_8: return rsx::texture_max_anisotropy::x8;
+	case CELL_GCM_TEXTURE_MAX_ANISO_10: return rsx::texture_max_anisotropy::x10;
+	case CELL_GCM_TEXTURE_MAX_ANISO_12: return rsx::texture_max_anisotropy::x12;
+	case CELL_GCM_TEXTURE_MAX_ANISO_16: return rsx::texture_max_anisotropy::x16;
+	}
+	throw EXCEPTION("Unknow anisotropy max mode %x", in);
+}
+
+rsx::texture_minify_filter rsx::to_texture_minify_filter(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_TEXTURE_NEAREST: return rsx::texture_minify_filter::nearest;
+	case CELL_GCM_TEXTURE_LINEAR: return rsx::texture_minify_filter::linear;
+	case CELL_GCM_TEXTURE_NEAREST_NEAREST: return rsx::texture_minify_filter::nearest_nearest;
+	case CELL_GCM_TEXTURE_LINEAR_NEAREST: return rsx::texture_minify_filter::linear_nearest;
+	case CELL_GCM_TEXTURE_NEAREST_LINEAR: return rsx::texture_minify_filter::nearest_linear;
+	case CELL_GCM_TEXTURE_LINEAR_LINEAR: return rsx::texture_minify_filter::linear_linear;
+	case CELL_GCM_TEXTURE_CONVOLUTION_MIN: return rsx::texture_minify_filter::linear_linear;
+	}
+	throw EXCEPTION("Unknow minify filter %x", in);
+}
+
+
+rsx::texture_magnify_filter rsx::to_texture_magnify_filter(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_TEXTURE_NEAREST: return rsx::texture_magnify_filter::nearest;
+	case CELL_GCM_TEXTURE_LINEAR: return rsx::texture_magnify_filter::linear;
+	case CELL_GCM_TEXTURE_CONVOLUTION_MAG: return rsx::texture_magnify_filter::convolution_mag;
+	}
+	throw EXCEPTION("Unknow magnify filter %x", in);
+}
+
+rsx::surface_target rsx::to_surface_target(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_SURFACE_TARGET_NONE: return rsx::surface_target::none;
+	case CELL_GCM_SURFACE_TARGET_0: return rsx::surface_target::surface_a;
+	case CELL_GCM_SURFACE_TARGET_1: return rsx::surface_target::surface_b;
+	case CELL_GCM_SURFACE_TARGET_MRT1: return rsx::surface_target::surfaces_a_b;
+	case CELL_GCM_SURFACE_TARGET_MRT2: return rsx::surface_target::surfaces_a_b_c;
+	case CELL_GCM_SURFACE_TARGET_MRT3: return rsx::surface_target::surfaces_a_b_c_d;
+	}
+	throw EXCEPTION("Unknow surface target %x", in);
+}
+
+rsx::surface_depth_format rsx::to_surface_depth_format(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_SURFACE_Z16: return rsx::surface_depth_format::z16;
+	case CELL_GCM_SURFACE_Z24S8: return rsx::surface_depth_format::z24s8;
+	}
+	throw EXCEPTION("Unknow surface depth format %x", in);
 }
 
 std::string rsx::get_method_name(const u32 id)
@@ -718,10 +1002,44 @@ std::string rsx::get_method_name(const u32 id)
 	return fmt::format("unknown/illegal method [0x%08x]", id);
 }
 
+rsx::surface_antialiasing rsx::to_surface_antialiasing(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_SURFACE_CENTER_1: return rsx::surface_antialiasing::center_1_sample;
+	case CELL_GCM_SURFACE_DIAGONAL_CENTERED_2: return rsx::surface_antialiasing::diagonal_centered_2_samples;
+	case CELL_GCM_SURFACE_SQUARE_CENTERED_4: return rsx::surface_antialiasing::square_centered_4_samples;
+	case CELL_GCM_SURFACE_SQUARE_ROTATED_4: return rsx::surface_antialiasing::square_rotated_4_samples;
+	}
+	throw EXCEPTION("unknow surface antialiasing format %x", in);
+}
+
+rsx::surface_color_format rsx::to_surface_color_format(u8 in)
+{
+	switch (in)
+	{
+	case CELL_GCM_SURFACE_X1R5G5B5_Z1R5G5B5: return rsx::surface_color_format::x1r5g5b5_z1r5g5b5;
+	case CELL_GCM_SURFACE_X1R5G5B5_O1R5G5B5: return rsx::surface_color_format::x1r5g5b5_o1r5g5b5;
+	case CELL_GCM_SURFACE_R5G6B5: return rsx::surface_color_format::r5g6b5;
+	case CELL_GCM_SURFACE_X8R8G8B8_Z8R8G8B8: return rsx::surface_color_format::x8r8g8b8_z8r8g8b8;
+	case CELL_GCM_SURFACE_X8R8G8B8_O8R8G8B8: return rsx::surface_color_format::x8r8g8b8_o8r8g8b8;
+	case CELL_GCM_SURFACE_A8R8G8B8: return rsx::surface_color_format::a8r8g8b8;
+	case CELL_GCM_SURFACE_B8: return rsx::surface_color_format::b8;
+	case CELL_GCM_SURFACE_G8B8: return rsx::surface_color_format::g8b8;
+	case CELL_GCM_SURFACE_F_W16Z16Y16X16: return rsx::surface_color_format::w16z16y16x16;
+	case CELL_GCM_SURFACE_F_W32Z32Y32X32: return rsx::surface_color_format::w32z32y32x32;
+	case CELL_GCM_SURFACE_F_X32: return rsx::surface_color_format::x32;
+	case CELL_GCM_SURFACE_X8B8G8R8_Z8B8G8R8: return rsx::surface_color_format::x8b8g8r8_z8b8g8r8;
+	case CELL_GCM_SURFACE_X8B8G8R8_O8B8G8R8: return rsx::surface_color_format::x8b8g8r8_o8b8g8r8;
+	case CELL_GCM_SURFACE_A8B8G8R8: return rsx::surface_color_format::a8b8g8r8;
+	}
+	throw EXCEPTION("unknow surface color format %x", in);
+}
+
 // Various parameter pretty printing function
 namespace
 {
-	std::string get_blend_factor(u16 factor) noexcept
+	std::string get_blend_factor(u16 factor)
 	{
 		switch (factor)
 		{
@@ -744,7 +1062,7 @@ namespace
 		return "Error";
 	}
 
-	std::string get_blend_op(u16 op) noexcept
+	std::string get_blend_op(u16 op)
 	{
 		switch (op)
 		{
@@ -760,7 +1078,7 @@ namespace
 		return "Error";
 	}
 
-	std::string get_logic_op(u32 op) noexcept
+	std::string get_logic_op(u32 op)
 	{
 		switch (op)
 		{
@@ -783,7 +1101,7 @@ namespace
 		return "Error";
 	}
 
-	std::string get_compare_func(u32 op) noexcept
+	std::string get_compare_func(u32 op)
 	{
 		switch (op)
 		{
@@ -799,30 +1117,30 @@ namespace
 		return "Error";
 	}
 
-	std::string get_primitive_mode(u8 draw_mode) noexcept
+	std::string get_primitive_mode(u8 draw_mode)
 	{
-		switch (draw_mode)
+		switch (rsx::to_primitive_type(draw_mode))
 		{
-		case CELL_GCM_PRIMITIVE_POINTS: return "Points";
-		case CELL_GCM_PRIMITIVE_LINES: return "Lines";
-		case CELL_GCM_PRIMITIVE_LINE_LOOP: return "Line_loop";
-		case CELL_GCM_PRIMITIVE_LINE_STRIP: return "Line_strip";
-		case CELL_GCM_PRIMITIVE_TRIANGLES: return "Triangles";
-		case CELL_GCM_PRIMITIVE_TRIANGLE_STRIP: return "Triangle_strip";
-		case CELL_GCM_PRIMITIVE_TRIANGLE_FAN: return "Triangle_fan";
-		case CELL_GCM_PRIMITIVE_QUADS: return "Quads";
-		case CELL_GCM_PRIMITIVE_QUAD_STRIP: return "Quad_strip";
-		case CELL_GCM_PRIMITIVE_POLYGON: return "Polygon";
+		case rsx::primitive_type::points: return "Points";
+		case rsx::primitive_type::lines: return "Lines";
+		case rsx::primitive_type::line_loop: return "Line_loop";
+		case rsx::primitive_type::line_strip: return "Line_strip";
+		case rsx::primitive_type::triangles: return "Triangles";
+		case rsx::primitive_type::triangle_strip: return "Triangle_strip";
+		case rsx::primitive_type::triangle_fan: return "Triangle_fan";
+		case rsx::primitive_type::quads: return "Quads";
+		case rsx::primitive_type::quad_strip: return "Quad_strip";
+		case rsx::primitive_type::polygon: return "Polygon";
 		}
 		return "Error";
 	}
 
-	std::string ptr_to_string(u32 ptr) noexcept
+	std::string ptr_to_string(u32 ptr)
 	{
 		return fmt::format("0x%08x", ptr);
 	}
 
-	std::string dma_mode(u32 arg) noexcept
+	std::string dma_mode(u32 arg)
 	{
 		switch (arg)
 		{
@@ -835,53 +1153,76 @@ namespace
 	}
 
 
-	std::string depth_stencil_surface_format(u32 format) noexcept
+	std::string depth_stencil_surface_format(u32 format)
 	{
-		switch (format)
+		switch (rsx::to_surface_depth_format(format))
 		{
-		case CELL_GCM_SURFACE_Z16: return "CELL_GCM_SURFACE_Z16";
-		case CELL_GCM_SURFACE_Z24S8: return "CELL_GCM_SURFACE_Z24S8";
+		case rsx::surface_depth_format::z16: return "CELL_GCM_SURFACE_Z16";
+		case rsx::surface_depth_format::z24s8: return "CELL_GCM_SURFACE_Z24S8";
 		}
 		return "Error";
 	}
 
-	std::string color_surface_format(u32 format) noexcept
+	std::string surface_antialiasing(u8 format)
 	{
-		switch (format)
+		switch (rsx::to_surface_antialiasing(format))
 		{
-		case CELL_GCM_SURFACE_X1R5G5B5_Z1R5G5B5: return "CELL_GCM_SURFACE_X1R5G5B5_Z1R5G5B5";
-		case CELL_GCM_SURFACE_X1R5G5B5_O1R5G5B5: return "CELL_GCM_SURFACE_X1R5G5B5_O1R5G5B5";
-		case CELL_GCM_SURFACE_R5G6B5: return "CELL_GCM_SURFACE_R5G6B5";
-		case CELL_GCM_SURFACE_X8R8G8B8_Z8R8G8B8: return "CELL_GCM_SURFACE_X8R8G8B8_Z8R8G8B8";
-		case CELL_GCM_SURFACE_X8R8G8B8_O8R8G8B8: return "CELL_GCM_SURFACE_X8R8G8B8_O8R8G8B8";
-		case CELL_GCM_SURFACE_A8R8G8B8: return "CELL_GCM_SURFACE_A8R8G8B8";
-		case CELL_GCM_SURFACE_B8: return "CELL_GCM_SURFACE_B8";
-		case CELL_GCM_SURFACE_G8B8: return "CELL_GCM_SURFACE_G8B8";
-		case CELL_GCM_SURFACE_F_W16Z16Y16X16: return "CELL_GCM_SURFACE_F_W16Z16Y16X16";
-		case CELL_GCM_SURFACE_F_W32Z32Y32X32: return "CELL_GCM_SURFACE_F_W32Z32Y32X32";
-		case CELL_GCM_SURFACE_F_X32: return "CELL_GCM_SURFACE_F_X32";
-		case CELL_GCM_SURFACE_X8B8G8R8_Z8B8G8R8: return "CELL_GCM_SURFACE_X8B8G8R8_Z8B8G8R8";
-		case CELL_GCM_SURFACE_X8B8G8R8_O8B8G8R8: return "CELL_GCM_SURFACE_X8B8G8R8_O8B8G8R8";
-		case CELL_GCM_SURFACE_A8B8G8R8: return "CELL_GCM_SURFACE_A8B8G8R8";
+		case rsx::surface_antialiasing::center_1_sample: return "1 sample centered";
+		case rsx::surface_antialiasing::diagonal_centered_2_samples: return "2 samples diagonal centered";
+		case rsx::surface_antialiasing::square_centered_4_samples: return "4 samples square centered";
+		case rsx::surface_antialiasing::square_rotated_4_samples: return "4 samples diagonal rotated";
 		}
 		return "Error";
 	}
 
-	std::string surface_target(u32 target) noexcept
+	std::string surface_color_format(u32 format)
 	{
-		switch (target)
+		switch (rsx::to_surface_color_format(format))
 		{
-		case CELL_GCM_SURFACE_TARGET_NONE: return "none";
-		case CELL_GCM_SURFACE_TARGET_0: return "surface A";
-		case CELL_GCM_SURFACE_TARGET_1: return "surface B";
-		case CELL_GCM_SURFACE_TARGET_MRT1: return "surfaces A and B";
-		case CELL_GCM_SURFACE_TARGET_MRT2: return "surfaces A, B and C";
-		case CELL_GCM_SURFACE_TARGET_MRT3: return "surfaces A,B, C and D";
+		case rsx::surface_color_format::x1r5g5b5_z1r5g5b5: return "CELL_GCM_SURFACE_X1R5G5B5_Z1R5G5B5";
+		case rsx::surface_color_format::x1r5g5b5_o1r5g5b5: return "CELL_GCM_SURFACE_X1R5G5B5_O1R5G5B5";
+		case rsx::surface_color_format::r5g6b5 : return "CELL_GCM_SURFACE_R5G6B5";
+		case rsx::surface_color_format::x8r8g8b8_z8r8g8b8: return "CELL_GCM_SURFACE_X8R8G8B8_Z8R8G8B8";
+		case rsx::surface_color_format::x8r8g8b8_o8r8g8b8: return "CELL_GCM_SURFACE_X8R8G8B8_O8R8G8B8";
+		case rsx::surface_color_format::a8r8g8b8: return "CELL_GCM_SURFACE_A8R8G8B8";
+		case rsx::surface_color_format::b8: return "CELL_GCM_SURFACE_B8";
+		case rsx::surface_color_format::g8b8: return "CELL_GCM_SURFACE_G8B8";
+		case rsx::surface_color_format::w16z16y16x16: return "CELL_GCM_SURFACE_F_W16Z16Y16X16";
+		case rsx::surface_color_format::w32z32y32x32: return "CELL_GCM_SURFACE_F_W32Z32Y32X32";
+		case rsx::surface_color_format::x32: return "CELL_GCM_SURFACE_F_X32";
+		case rsx::surface_color_format::x8b8g8r8_z8b8g8r8: return "CELL_GCM_SURFACE_X8B8G8R8_Z8B8G8R8";
+		case rsx::surface_color_format::x8b8g8r8_o8b8g8r8: return "CELL_GCM_SURFACE_X8B8G8R8_O8B8G8R8";
+		case rsx::surface_color_format::a8b8g8r8: return "CELL_GCM_SURFACE_A8B8G8R8";
 		}
 		return "Error";
 	}
 
-	std::string get_clear_color(u32 clear_color) noexcept
+	std::string texture_dimension(u8 dim)
+	{
+		switch(rsx::to_texture_dimension(dim))
+		{
+		case rsx::texture_dimension::dimension1d: return "1D";
+		case rsx::texture_dimension::dimension2d: return "2D";
+		case rsx::texture_dimension::dimension3d: return "3D";
+		}
+		return "";
+	}
+
+	std::string surface_target(u32 target)
+	{
+		switch (rsx::to_surface_target(target))
+		{
+		case rsx::surface_target::none: return "none";
+		case rsx::surface_target::surface_a: return "surface A";
+		case rsx::surface_target::surface_b: return "surface B";
+		case rsx::surface_target::surfaces_a_b: return "surfaces A and B";
+		case rsx::surface_target::surfaces_a_b_c: return "surfaces A, B and C";
+		case rsx::surface_target::surfaces_a_b_c_d: return "surfaces A,B, C and D";
+		}
+		return "Error";
+	}
+
+	std::string get_clear_color(u32 clear_color)
 	{
 		u8 clear_a = clear_color >> 24;
 		u8 clear_r = clear_color >> 16;
@@ -890,14 +1231,14 @@ namespace
 		return "A = " + std::to_string(clear_a / 255.0f) + " R = " + std::to_string(clear_r / 255.0f) + " G = " + std::to_string(clear_g / 255.0f) + " B = " + std::to_string(clear_b / 255.0f);
 	}
 
-	static std::string get_zstencil_clear(u32 zstencil) noexcept
+	static std::string get_zstencil_clear(u32 zstencil)
 	{
 		u32 depth = zstencil >> 8;
 		u32 stencil = zstencil & 0xff;
 		return "Z = " + std::to_string(depth) + " S = " + std::to_string(stencil);
 	}
 
-	std::string get_stencil_op(u32 op) noexcept
+	std::string get_stencil_op(u32 op)
 	{
 		switch (op)
 		{
@@ -912,22 +1253,21 @@ namespace
 		return "Error";
 	}
 
-	std::string get_vertex_attribute_format(u8 type) noexcept
+	std::string get_vertex_attribute_format(u8 type)
 	{
-		switch (type)
+		switch (rsx::to_vertex_base_type(type))
 		{
-		case CELL_GCM_VERTEX_S1: return "Short";
-		case CELL_GCM_VERTEX_F: return "Float";
-		case CELL_GCM_VERTEX_SF: return "Half float";
-		case CELL_GCM_VERTEX_UB: return "Unsigned byte";
-		case CELL_GCM_VERTEX_S32K: return "Signed int";
-		case CELL_GCM_VERTEX_CMP: return "CMP";
-		case CELL_GCM_VERTEX_UB256: return "UB256";
+		case rsx::vertex_base_type::s1: return "Signed short normalized";
+		case rsx::vertex_base_type::f: return "Float";
+		case rsx::vertex_base_type::sf: return "Half float";
+		case rsx::vertex_base_type::ub: return "Unsigned byte normalized";
+		case rsx::vertex_base_type::s32k: return "Signed short unormalized";
+		case rsx::vertex_base_type::cmp: return "CMP";
+		case rsx::vertex_base_type::ub256: return "Unsigned byte unormalized";
 		}
-		return "Error";
 	}
 
-	std::string unpack_vertex_format(u32 arg) noexcept
+	std::string unpack_vertex_format(u32 arg)
 	{
 		u32 frequency = arg >> 16;
 		u32 stride = (arg >> 8) & 0xff;
@@ -939,32 +1279,32 @@ namespace
 		return "Type = " + get_vertex_attribute_format(type) + " size = " + std::to_string(size) + " stride = " + std::to_string(stride) + " frequency = " + std::to_string(frequency);
 	}
 
-	std::string index_type(u16 arg) noexcept
+	std::string index_type(u16 arg)
 	{
-		switch (arg)
+		switch (rsx::to_index_array_type(arg))
 		{
-		case CELL_GCM_DRAW_INDEX_ARRAY_TYPE_16: return "unsigned short";
-		case CELL_GCM_DRAW_INDEX_ARRAY_TYPE_32: return "unsigned int";
+		case rsx::index_array_type::u16: return "unsigned short";
+		case rsx::index_array_type::u32: return "unsigned int";
 		}
 		return "Error";
 	}
 
-	std::string transform_constant(size_t index, u32 arg) noexcept
+	std::string transform_constant(size_t index, u32 arg)
 	{
 		return "Transform constant " + std::to_string(index) + ": " + std::to_string(arg) + "/" + std::to_string((float&)arg);
 	}
 
-	std::string texture_offset(size_t index, u32 arg) noexcept
+	std::string texture_offset(size_t index, u32 arg)
 	{
 		return "Texture " + std::to_string(index) + ": Offset @" + ptr_to_string(arg);
 	}
 
-	std::string texture_size(size_t index, u32 arg) noexcept
+	std::string texture_size(size_t index, u32 arg)
 	{
 		return "Texture " + std::to_string(index) + ": width = " + std::to_string(arg & 0xffff) + " height = " + std::to_string(arg >> 16);
 	}
 
-	static std::string get_texture_format_name(u32 format) noexcept
+	static std::string get_texture_format_name(u32 format)
 	{
 		switch (format)
 		{
@@ -999,7 +1339,7 @@ namespace
 		return "Error";
 	}
 
-	std::string texture_format(size_t index, u32 arg) noexcept
+	std::string texture_format(size_t index, u32 arg)
 	{
 		int format = ((arg >> 8) & 0xFF);
 		return "Texture " + std::to_string(index) + ": location = " + ptr_to_string((arg & 0x3) - 1) +
@@ -1012,23 +1352,23 @@ namespace
 			" mipmap levels = " + std::to_string((arg >> 16) & 0xFFFF);
 	}
 
-	std::string get_texture_wrap_mode(u8 wrap) noexcept
+	std::string get_texture_wrap_mode(u8 wrap)
 	{
-		switch (wrap)
+		switch (rsx::to_texture_wrap_mode(wrap))
 		{
-		case CELL_GCM_TEXTURE_WRAP: return "WRAP";
-		case CELL_GCM_TEXTURE_MIRROR: return "MIRROR";
-		case CELL_GCM_TEXTURE_CLAMP_TO_EDGE: return "CLAMP_TO_EDGE";
-		case CELL_GCM_TEXTURE_BORDER: return "BORDER";
-		case CELL_GCM_TEXTURE_CLAMP: return "CLAMP";
-		case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP_TO_EDGE: return "MIRROR_ONCE_CLAMP_TO_EDGE";
-		case CELL_GCM_TEXTURE_MIRROR_ONCE_BORDER: return "MIRROR_ONCE_BORDER";
-		case CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP: return "MIRROR_ONCE_CLAMP";
+		case rsx::texture_wrap_mode::wrap: return "WRAP";
+		case rsx::texture_wrap_mode::mirror: return "MIRROR";
+		case rsx::texture_wrap_mode::clamp_to_edge: return "CLAMP_TO_EDGE";
+		case rsx::texture_wrap_mode::border: return "BORDER";
+		case rsx::texture_wrap_mode::clamp: return "CLAMP";
+		case rsx::texture_wrap_mode::mirror_once_clamp_to_edge: return "MIRROR_ONCE_CLAMP_TO_EDGE";
+		case rsx::texture_wrap_mode::mirror_once_border: return "MIRROR_ONCE_BORDER";
+		case rsx::texture_wrap_mode::mirror_once_clamp: return "MIRROR_ONCE_CLAMP";
 		}
 		return "Error";
 	}
 
-	std::string get_zfunc_name(u8 op) noexcept
+	std::string get_zfunc_name(u8 op)
 	{
 		switch (op)
 		{
@@ -1044,7 +1384,7 @@ namespace
 		return "Error";
 	}
 
-	std::string texture_address(size_t index, u32 arg) noexcept
+	std::string texture_address(size_t index, u32 arg)
 	{
 		return "Texture " + std::to_string(index) + ": wrap_s = " + get_texture_wrap_mode(arg & 0xF) +
 			" wrap_t = " + get_texture_wrap_mode((arg >> 8) & 0xF) +
@@ -1056,23 +1396,23 @@ namespace
 			" signed remap = " + std::to_string((arg >> 24) & 0xF);
 	}
 
-	std::string get_texture_max_aniso_name(u8 aniso) noexcept
+	std::string get_texture_max_aniso_name(u8 aniso)
 	{
-		switch (aniso)
+		switch (rsx::to_texture_max_anisotropy(aniso))
 		{
-		case CELL_GCM_TEXTURE_MAX_ANISO_1: return "1";
-		case CELL_GCM_TEXTURE_MAX_ANISO_2: return "2";
-		case CELL_GCM_TEXTURE_MAX_ANISO_4: return "4";
-		case CELL_GCM_TEXTURE_MAX_ANISO_6: return "6";
-		case CELL_GCM_TEXTURE_MAX_ANISO_8: return "8";
-		case CELL_GCM_TEXTURE_MAX_ANISO_10: return "10";
-		case CELL_GCM_TEXTURE_MAX_ANISO_12: return "12";
-		case CELL_GCM_TEXTURE_MAX_ANISO_16: return "16";
+		case rsx::texture_max_anisotropy::x1 : return "1";
+		case rsx::texture_max_anisotropy::x2: return "2";
+		case rsx::texture_max_anisotropy::x4: return "4";
+		case rsx::texture_max_anisotropy::x6: return "6";
+		case rsx::texture_max_anisotropy::x8: return "8";
+		case rsx::texture_max_anisotropy::x10: return "10";
+		case rsx::texture_max_anisotropy::x12: return "12";
+		case rsx::texture_max_anisotropy::x16: return "16";
 		}
 		return "Error";
 	}
 
-	std::string texture_control0(size_t index, u32 arg) noexcept
+	std::string texture_control0(size_t index, u32 arg)
 	{
 		std::string result = "Texture " + std::to_string(index);
 		if ((arg >> 31) & 0x1)
@@ -1087,29 +1427,157 @@ namespace
 		return result;
 	}
 
+	std::string get_remap_channel(u8 op) noexcept
+	{
+		switch (op)
+		{
+		case 0: return "A";
+		case 1: return "R";
+		case 2: return "G";
+		case 3: return "B";
+		}
+		return "Error";
+	}
+
 	std::string texture_control1(size_t index, u32 arg) noexcept
 	{
 		return "Texture " + std::to_string(index) +
-			" remap = " + std::to_string(arg);
+			" Component 0 = " + get_remap_channel(arg & 0x3) +
+			" Component 1 = " + get_remap_channel((arg >> 2) & 0x3) +
+			" Component 2 = " + get_remap_channel((arg >> 4) & 0x3) +
+			" Component 3 = " + get_remap_channel((arg >> 6) & 0x3);
 	}
 
-	std::string texture_control3(size_t index, u32 arg) noexcept
+	std::string texture_control3(size_t index, u32 arg)
 	{
 		return "Texture " + std::to_string(index) +
 			" depth = " + std::to_string(arg >> 20) +
 			" pitch = " + std::to_string(arg & 0xFFFFF);
 	}
 
-	std::string texture_border_color(size_t index, u32 arg) noexcept
+	std::string texture_border_color(size_t index, u32 arg)
 	{
 		return "Texture " + std::to_string(index) +
 			" border color = " + std::to_string(arg);
 	}
 
-	std::string texture_filter(size_t index, u32 arg) noexcept
+	std::string texture_filter(size_t index, u32 arg)
 	{
 		return "Texture " + std::to_string(index) +
-			" filter = " + std::to_string(arg);
+			" bias = " + std::to_string(arg & 0x1fff) +
+			" min_filter = " + std::to_string((arg >> 16) & 0x7) +
+			" mag_filter = " + std::to_string((arg >> 24) & 0x7) +
+			" convolution_filter = " + std::to_string((arg >> 13) & 0xF) +
+			" a_signed = " + std::to_string((arg >> 28) & 0x1) +
+			" r_signed = " + std::to_string((arg >> 29) & 0x1) +
+			" g_signed = " + std::to_string((arg >> 30) & 0x1) +
+			" b_signed = " + std::to_string((arg >> 31) & 0x1);
+	}
+
+	std::string vertex_input_mask(u32 arg)
+	{
+		const std::string input_names[] =
+		{
+		"in_pos", "in_weight", "in_normal",
+			"in_diff_color", "in_spec_color",
+			"in_fog",
+			"in_point_size", "in_7",
+			"in_tc0", "in_tc1", "in_tc2", "in_tc3",
+			"in_tc4", "in_tc5", "in_tc6", "in_tc7"
+		};
+		std::string result = "Transform program enabled inputs:";
+		for (unsigned i = 0; i < 16; i++)
+			if (arg & (1 << i))
+				result += input_names[i] + " ";
+		return result;
+	}
+
+	std::string vertex_output_mask(u32 arg)
+	{
+		const std::string output_names[] =
+		{
+		"diffuse_color",
+		"specular_color",
+		"back_diffuse_color",
+		"back_specular_color",
+		"fog",
+		"point_size",
+		"clip_distance[0]",
+		"clip_distance[1]",
+		"clip_distance[2]",
+		"clip_distance[3]",
+		"clip_distance[4]",
+		"clip_distance[5]",
+		"tc8",
+		"tc9",
+		"tc0",
+		"tc1",
+		"tc2",
+		"tc3",
+		"tc4",
+		"tc5",
+		"tc6",
+		"tc7"
+		};
+		std::string result = "Transform program outputs:";
+		for (unsigned i = 0; i < 22; i++)
+			if (arg & (1 << i))
+				result += output_names[i] + " ";
+		return result;
+	}
+
+	std::string shader_control(u32 arg)
+	{
+		return "Shader control: raw_value =" + std::to_string(arg) +
+			" reg_count = " + std::to_string((arg >> 24) & 0xFF) +
+			((arg & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT) ? " depth_replace " : "") +
+			((arg & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS) ? " 32b_exports " : "");
+	}
+
+	std::string anti_aliasing_control(u32 arg)
+	{
+		std::string result = "Anti_aliasing: ";
+		if (arg & 0x1)
+			result += "enabled";
+		else
+			result += "disabled";
+		result += " alpha_to_coverage = ";
+		if ((arg >> 4) & 0x1)
+			result += "enabled";
+		else
+			result += "disabled";
+		result += " alpha_to_one = ";
+		if ((arg >> 8) & 0x1)
+			result += "enabled";
+		else
+			result += "disabled";
+		result += " sample_mask = " + ptr_to_string(arg >> 16);
+		return result;
+	}
+
+	std::string origin_mode(u32 origin)
+	{
+		switch (rsx::to_window_origin(origin))
+		{
+		case rsx::window_origin::bottom: return "bottom";
+		case rsx::window_origin::top: return "top";
+		}
+		throw EXCEPTION("Wrong origin mode");
+	}
+
+	std::string pixel_center_mode(u32 in)
+	{
+		switch (rsx::to_window_pixel_center(in))
+		{
+		case rsx::window_pixel_center::half: return "half";
+		case rsx::window_pixel_center::integer: return "integer";
+		}
+		throw EXCEPTION("Wrong origin mode");
+	}
+
+	std::string shader_window(u32 arg)
+	{
+		return "Viewport: height = " + std::to_string(arg & 0xFFF) + " origin = " + origin_mode((arg >> 12) & 0xF) + " pixel center = " + pixel_center_mode((arg >> 16) & 0xF);
 	}
 
 #define OPCODE_RANGE_1(opcode, increment, index, printing_function) \
@@ -1134,6 +1602,10 @@ namespace
 #define OPCODE_RANGE_32(opcode, increment, index, printing_function) \
 	OPCODE_RANGE_16((opcode), (increment), (index), (printing_function)) \
 	OPCODE_RANGE_16((opcode), (increment), (index) + 16, (printing_function))
+
+#define OPCODE_RANGE_64(opcode, increment, index, printing_function) \
+	OPCODE_RANGE_32((opcode), (increment), (index), (printing_function)) \
+	OPCODE_RANGE_32((opcode), (increment), (index) + 32, (printing_function))
 
 	const std::unordered_map<u32, std::string(*)(u32)> printing_functions =
 	{
@@ -1173,7 +1645,7 @@ namespace
 		{ NV4097_SET_SURFACE_PITCH_Z, [](u32 arg) -> std::string { return "Surface Zeta: Pitch = " + std::to_string(arg); } },
 		{ NV4097_SET_SURFACE_ZETA_OFFSET, [](u32 arg) -> std::string { return "Surface Zeta: Offset = " + ptr_to_string(arg); } },
 		{ NV4097_SET_CONTEXT_DMA_ZETA, [](u32 arg) -> std::string { return "Surface Zeta: DMA mode = " + dma_mode(arg);} },
-		{ NV4097_SET_SURFACE_FORMAT, [](u32 arg) -> std::string { return "Surface: Color format = " + color_surface_format(arg & 0x1F) + " DepthStencil format = " + depth_stencil_surface_format((arg >> 5) & 0x7); } },
+		{ NV4097_SET_SURFACE_FORMAT, [](u32 arg) -> std::string { return "Surface: Color format = " + surface_color_format(arg & 0x1F) + " DepthStencil format = " + depth_stencil_surface_format((arg >> 5) & 0x7) + " Anti aliasing =" + surface_antialiasing((arg >> 12) & 0x7); } },
 		{ NV4097_SET_SURFACE_CLIP_HORIZONTAL, [](u32 arg) -> std::string { return "Surface: clip x = " + std::to_string(arg & 0xFFFF) + " width = " + std::to_string(arg >> 16); } },
 		{ NV4097_SET_SURFACE_CLIP_VERTICAL, [](u32 arg) -> std::string { return "Surface: clip y = " + std::to_string(arg & 0xFFFF) + " height = " + std::to_string(arg >> 16); } },
 		{ NV4097_SET_SURFACE_COLOR_TARGET, [](u32 arg) -> std::string { return "Surface: Targets " + surface_target(arg); } },
@@ -1202,6 +1674,11 @@ namespace
 		{ NV4097_SET_STENCIL_FUNC_REF, [](u32 arg) -> std::string { return "Stencil: Ref = " + std::to_string(arg); } },
 		{ NV4097_INVALIDATE_VERTEX_CACHE_FILE, [](u32) -> std::string { return "(invalidate vertex cache file)"; } },
 		{ NV4097_INVALIDATE_VERTEX_FILE, [](u32) -> std::string { return "(invalidate vertex file)"; } },
+		{ NV4097_SET_VERTEX_ATTRIB_INPUT_MASK, vertex_input_mask},
+		{ NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK, vertex_output_mask },
+		{ NV4097_SET_SHADER_CONTROL, shader_control },
+		{ NV4097_SET_ANTI_ALIASING_CONTROL, anti_aliasing_control },
+		{ NV4097_SET_SHADER_WINDOW, shader_window },
 		{ NV4097_SET_VERTEX_DATA_ARRAY_FORMAT, [](u32 arg) -> std::string { return "Vertex array 0: " + unpack_vertex_format(arg); } },
 		{ NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + 1, [](u32 arg) -> std::string { return "Vertex array 1: " + unpack_vertex_format(arg); } },
 		{ NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + 2, [](u32 arg) -> std::string { return "Vertex array 2: " + unpack_vertex_format(arg); } },

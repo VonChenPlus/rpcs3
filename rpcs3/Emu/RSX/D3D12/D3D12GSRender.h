@@ -1,9 +1,6 @@
 #pragma once
 
 #include "D3D12Utils.h"
-#include "Utilities/rPlatform.h" // only for rImage
-#include "Utilities/File.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/RSX/GSRender.h"
@@ -57,8 +54,8 @@ private:
 	ComPtr<struct IDXGISwapChain3> m_swap_chain;
 	ComPtr<ID3D12Resource> m_backbuffer[2];
 	ComPtr<ID3D12DescriptorHeap> m_backbuffer_descriptor_heap[2];
-	// m_rootSignatures[N] is RS with N texture/sample
-	ComPtr<ID3D12RootSignature> m_root_signatures[17];
+
+	ComPtr<ID3D12RootSignature> m_shared_root_signature;
 
 	// TODO: Use a tree structure to parse more efficiently
 	data_cache m_texture_cache;
@@ -66,123 +63,105 @@ private:
 
 	rsx::surface_info m_surface;
 
-	RSXVertexProgram vertex_program;
-	RSXFragmentProgram fragment_program;
+	RSXVertexProgram m_vertex_program;
+	RSXFragmentProgram m_fragment_program;
 	PipelineStateObjectCache m_pso_cache;
-	std::tuple<ID3D12PipelineState *, std::vector<size_t>, size_t> *m_current_pso;
+	std::tuple<ComPtr<ID3D12PipelineState>, size_t, size_t> m_current_pso;
 
 	struct
 	{
-		size_t m_draw_calls_duration;
-		size_t m_draw_calls_count;
-		size_t m_prepare_rtt_duration;
-		size_t m_vertex_index_duration;
-		size_t m_buffer_upload_size;
-		size_t m_program_load_duration;
-		size_t m_constants_duration;
-		size_t m_texture_duration;
-		size_t m_flip_duration;
+		size_t draw_calls_duration;
+		size_t draw_calls_count;
+		size_t prepare_rtt_duration;
+		size_t vertex_index_duration;
+		size_t buffer_upload_size;
+		size_t program_load_duration;
+		size_t constants_duration;
+		size_t texture_duration;
+		size_t flip_duration;
 	} m_timers;
 
 	void reset_timer();
 
-	struct Shader
+	struct shader
 	{
-		ID3D12PipelineState *m_PSO;
-		ID3D12RootSignature *m_rootSignature;
-		ID3D12Resource *m_vertexBuffer;
-		ID3D12DescriptorHeap *m_textureDescriptorHeap;
-		ID3D12DescriptorHeap *m_samplerDescriptorHeap;
-		void Init(ID3D12Device *device, ID3D12CommandQueue *gfxcommandqueue);
-		void Release();
+		ID3D12PipelineState *pso;
+		ID3D12RootSignature *root_signature;
+		ID3D12Resource *vertex_buffer;
+		ID3D12DescriptorHeap *texture_descriptor_heap;
+		ID3D12DescriptorHeap *sampler_descriptor_heap;
+		void init(ID3D12Device *device, ID3D12CommandQueue *gfx_command_queue);
+		void release();
 	};
 
 	/**
 	 * Stores data related to the scaling pass that turns internal
 	 * render targets into presented buffers.
 	 */
-	Shader m_output_scaling_pass;
-
-	/**
-	 * Data used when depth buffer is converted to uchar textures.
-	 */
-	ID3D12PipelineState *m_convertPSO;
-	ID3D12RootSignature *m_convertRootSignature;
-	void initConvertShader();
+	shader m_output_scaling_pass;
 
 	resource_storage m_per_frame_storage[2];
 	resource_storage &get_current_resource_storage();
 	resource_storage &get_non_current_resource_storage();
 
-	// Constants storage
-	data_heap<ID3D12Resource, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT> m_constants_data;
-	// Vertex storage
-	data_heap<ID3D12Resource, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT> m_vertex_index_data;
-	// Texture storage
-	data_heap<ID3D12Resource, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT> m_texture_upload_data;
-	data_heap<ID3D12Heap, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT> m_uav_heap;
-	data_heap<ID3D12Resource, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT> m_readback_resources;
+	// Textures, constants, index and vertex buffers storage
+	d3d12_data_heap m_buffer_data;
+	d3d12_data_heap m_readback_resources;
+	ComPtr<ID3D12Resource> m_vertex_buffer_data;
 
-	struct
-	{
-		bool m_indexed; /*<! is draw call using an index buffer */
-		size_t m_count; /*<! draw call vertex count */
-	} m_rendering_info;
+	rsx::render_targets m_rtts;
 
-	render_targets m_rtts;
-
-	std::vector<D3D12_INPUT_ELEMENT_DESC> m_IASet;
-	std::vector<D3D12_VERTEX_BUFFER_VIEW> m_vertex_buffer_views;
-
-	INT g_descriptor_stride_srv_cbv_uav;
-	INT g_descriptor_stride_dsv;
-	INT g_descriptor_stride_rtv;
-	INT g_descriptor_stride_samplers;
+	INT m_descriptor_stride_srv_cbv_uav;
+	INT m_descriptor_stride_dsv;
+	INT m_descriptor_stride_rtv;
+	INT m_descriptor_stride_samplers;
 
 	// Used to fill unused texture slot
 	ID3D12Resource *m_dummy_texture;
 
-	// Store previous fbo addresses to detect RTT config changes.
-	u32 m_previous_address_a;
-	u32 m_previous_address_b;
-	u32 m_previous_address_c;
-	u32 m_previous_address_d;
-	u32 m_previous_address_z;
+	// Currently used shader resources / samplers descriptor
+	u32 m_current_transform_constants_buffer_descriptor_id;
+	ComPtr<ID3D12DescriptorHeap> m_current_texture_descriptors;
+	ComPtr<ID3D12DescriptorHeap> m_current_sampler_descriptors;
 public:
 	D3D12GSRender();
 	virtual ~D3D12GSRender();
+
 private:
 	void init_d2d_structures();
 	void release_d2d_structures();
 
-	bool load_program();
+	void load_program();
 
 	void set_rtt_and_ds(ID3D12GraphicsCommandList *command_list);
 
 	/**
-	* Create vertex and index buffers (if needed) and set them to cmdlist.
-	* Non native primitive type are emulated by index buffers expansion.
+	 * Create vertex and index buffers (if needed) and set them to cmdlist.
+	 * Non native primitive type are emulated by index buffers expansion.
+	 * Returns whether the draw call is indexed or not and the vertex count to draw.
 	*/
-	void upload_and_set_vertex_index_data(ID3D12GraphicsCommandList *command_list);
+	std::tuple<bool, size_t, std::vector<D3D12_SHADER_RESOURCE_VIEW_DESC> > upload_and_set_vertex_index_data(ID3D12GraphicsCommandList *command_list);
 
-	std::vector<std::pair<u32, u32> > m_first_count_pairs;
 	/**
 	 * Upload all enabled vertex attributes for vertex in ranges described by vertex_ranges.
 	 * A range in vertex_range is a pair whose first element is the index of the beginning of the
 	 * range, and whose second element is the number of vertex in this range.
 	 */
-	void upload_vertex_attributes(const std::vector<std::pair<u32, u32> > &vertex_ranges);
+	std::vector<D3D12_SHADER_RESOURCE_VIEW_DESC> upload_vertex_attributes(const std::vector<std::pair<u32, u32> > &vertex_ranges,
+		gsl::not_null<ID3D12GraphicsCommandList*> command_list);
+
+	std::tuple<D3D12_INDEX_BUFFER_VIEW, size_t> generate_index_buffer_for_emulated_primitives_array(const std::vector<std::pair<u32, u32> > &vertex_ranges);
 
 	void upload_and_bind_scale_offset_matrix(size_t descriptor_index);
 	void upload_and_bind_vertex_shader_constants(size_t descriptor_index);
-	void upload_and_bind_fragment_shader_constants(size_t descriptorIndex);
+	D3D12_CONSTANT_BUFFER_VIEW_DESC upload_fragment_shader_constants();
 	/**
 	 * Fetch all textures recorded in the state in the render target cache and in the texture cache.
 	 * If a texture is not cached, populate cmdlist with uploads command.
 	 * Create necessary resource view/sampler descriptors in the per frame storage struct.
 	 * If the count of enabled texture is below texture_count, fills with dummy texture and sampler.
 	 */
-	void upload_and_bind_textures(ID3D12GraphicsCommandList *command_list, size_t descriptor_index, size_t texture_count);
+	void upload_textures(ID3D12GraphicsCommandList *command_list, size_t texture_count);
 
 	/**
 	 * Creates render target if necessary.
@@ -210,11 +189,9 @@ protected:
 	virtual void end() override;
 	virtual void flip(int buffer) override;
 
-	virtual void load_vertex_data(u32 first, u32 count) override;
-	virtual void load_vertex_index_data(u32 first, u32 count) override;
+	virtual bool on_access_violation(u32 address, bool is_writing) override;
 
-	virtual void copy_render_targets_to_memory(void *buffer, u8 rtt) override;
-	virtual void copy_depth_buffer_to_memory(void *buffer) override;
-	virtual void copy_stencil_buffer_to_memory(void *buffer) override;
+	virtual std::array<std::vector<gsl::byte>, 4> copy_render_targets_to_memory() override;
+	virtual std::array<std::vector<gsl::byte>, 2> copy_depth_stencil_buffer_to_memory() override;
 	virtual std::pair<std::string, std::string> get_programs() const override;
 };

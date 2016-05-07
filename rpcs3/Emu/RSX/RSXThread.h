@@ -1,37 +1,38 @@
 #pragma once
 
+#include <stack>
+#include <deque>
+#include <set>
 #include "GCM.h"
 #include "RSXTexture.h"
 #include "RSXVertexProgram.h"
 #include "RSXFragmentProgram.h"
 
-#include <stack>
-#include "Utilities/Semaphore.h"
 #include "Utilities/Thread.h"
 #include "Utilities/Timer.h"
+#include "Utilities/geometry.h"
 
 extern u64 get_system_time();
 
 struct frame_capture_data
 {
-	struct buffer
-	{
-		std::vector<u8> data;
-		size_t width = 0, height = 0;
-	};
-
 	struct draw_state
 	{
 		std::string name;
 		std::pair<std::string, std::string> programs;
-		buffer color_buffer[4];
-		buffer depth;
-		buffer stencil;
+		size_t width = 0, height = 0;
+		rsx::surface_color_format color_format;
+		std::array<std::vector<gsl::byte>, 4> color_buffer;
+		rsx::surface_depth_format depth_format;
+		std::array<std::vector<gsl::byte>, 2> depth_stencil;
+		rsx::index_array_type index_type;
+		std::vector<gsl::byte> index;
+		u32 vertex_count;
 	};
 	std::vector<std::pair<u32, u32> > command_queue;
 	std::vector<draw_state> draw_calls;
 
-	void reset() noexcept
+	void reset()
 	{
 		command_queue.clear();
 		draw_calls.clear();
@@ -40,6 +41,25 @@ struct frame_capture_data
 
 extern bool user_asked_for_frame_capture;
 extern frame_capture_data frame_debug;
+
+namespace rsx
+{
+	enum class shader_language
+	{
+		glsl,
+		hlsl,
+	};
+}
+
+template<>
+struct bijective<rsx::shader_language, const char*>
+{
+	static constexpr bijective_pair<rsx::shader_language, const char*> map[]
+	{
+		{ rsx::shader_language::glsl, "glsl" },
+		{ rsx::shader_language::hlsl, "hlsl" },
+	};
+};
 
 namespace rsx
 {
@@ -57,166 +77,75 @@ namespace rsx
 		};
 	}
 
-	//TODO
-	union alignas(4) method_registers_t
+	struct decompiled_shader
 	{
-		u8 _u8[0x10000];
-		u32 _u32[0x10000 >> 2];
-/*
-		struct alignas(4)
+		std::string code;
+	};
+
+	struct finalized_shader
+	{
+		u64 ucode_hash;
+		std::string code;
+	};
+
+	template<typename Type, typename KeyType = u64, typename Hasher = std::hash<KeyType>>
+	struct cache
+	{
+	private:
+		std::unordered_map<KeyType, Type, Hasher> m_entries;
+
+	public:
+		const Type* find(u64 key) const
 		{
-			u8 pad[NV4097_SET_TEXTURE_OFFSET - 4];
+			auto found = m_entries.find(key);
 
-			struct alignas(4) texture_t
-			{
-				u32 offset;
+			if (found == m_entries.end())
+				return nullptr;
 
-				union format_t
-				{
-					u32 _u32;
+			return &found->second;
+		}
 
-					struct
-					{
-						u32: 1;
-						u32 location : 1;
-						u32 cubemap : 1;
-						u32 border_type : 1;
-						u32 dimension : 4;
-						u32 format : 8;
-						u32 mipmap : 16;
-					};
-				} format;
-
-				union address_t
-				{
-					u32 _u32;
-
-					struct
-					{
-						u32 wrap_s : 4;
-						u32 aniso_bias : 4;
-						u32 wrap_t : 4;
-						u32 unsigned_remap : 4;
-						u32 wrap_r : 4;
-						u32 gamma : 4;
-						u32 signed_remap : 4;
-						u32 zfunc : 4;
-					};
-				} address;
-
-				u32 control0;
-				u32 control1;
-				u32 filter;
-				u32 image_rect;
-				u32 border_color;
-			} textures[limits::textures_count];
-		};
-*/
-		u32& operator[](int index)
+		void insert(KeyType key, const Type &shader)
 		{
-			return _u32[index >> 2];
+			m_entries.insert({ key, shader });
 		}
 	};
 
-	extern u32 method_registers[0x10000 >> 2];
+	struct shaders_cache
+	{
+		cache<decompiled_shader> decompiled_fragment_shaders;
+		cache<decompiled_shader> decompiled_vertex_shaders;
+		cache<finalized_shader> finailized_fragment_shaders;
+		cache<finalized_shader> finailized_vertex_shaders;
 
-	u32 get_vertex_type_size(u32 type);
+		void load(const std::string &path, shader_language lang);
+		void load(shader_language lang);
+
+		static std::string path_to_root();
+	};
+
+	u32 get_vertex_type_size_on_host(vertex_base_type type, u32 size);
 
 	u32 get_address(u32 offset, u32 location);
 
-	template<typename T>
-	void pad_texture(void* inputPixels, void* outputPixels, u16 inputWidth, u16 inputHeight, u16 outputWidth, u16 outputHeight) 
+	struct tiled_region
 	{
-		T *src, *dst;
-		src = static_cast<T*>(inputPixels);
-		dst = static_cast<T*>(outputPixels);
+		u32 address;
+		u32 base;
+		GcmTileInfo *tile;
+		u8 *ptr;
 
-		for (u16 h = 0; h < inputHeight; ++h)
-		{
-			const u32 padded_pos = h * outputWidth;
-			const u32 pos = h * inputWidth;
-			for (u16 w = 0; w < inputWidth; ++w)
-			{
-				dst[padded_pos + w] = src[pos + w];
-			}
-		}
-	}
-
-	/*   Note: What the ps3 calls swizzling in this case is actually z-ordering / morton ordering of pixels
-	*       - Input can be swizzled or linear, bool flag handles conversion to and from
-	*       - It will handle any width and height that are a power of 2, square or non square
-	*	 Restriction: It has mixed results if the height or width is not a power of 2
-	*/
-	template<typename T>
-	void convert_linear_swizzle(void* inputPixels, void* outputPixels, u16 width, u16 height, bool inputIsSwizzled)
-	{
-		u32 log2width, log2height;
-
-		log2width = log2(width);
-		log2height = log2(height);
-
-		// Max mask possible for square texture
-		u32 x_mask = 0x55555555;
-		u32 y_mask = 0xAAAAAAAA;
-
-		// We have to limit the masks to the lower of the two dimensions to allow for non-square textures
-		u32 limit_mask = (log2width < log2height) ? log2width : log2height;
-		// double the limit mask to account for bits in both x and y
-		limit_mask = 1 << (limit_mask << 1);
-
-		//x_mask, bits above limit are 1's for x-carry
-		x_mask = (x_mask | ~(limit_mask - 1));
-		//y_mask. bits above limit are 0'd, as we use a different method for y-carry over
-		y_mask = (y_mask & (limit_mask - 1));
-
-		u32 offs_y = 0;
-		u32 offs_x = 0;
-		u32 offs_x0 = 0; //total y-carry offset for x
-		u32 y_incr = limit_mask;
-
-		T *src, *dst;
-
-		if (!inputIsSwizzled)
-		{
-			for (int y = 0; y < height; ++y) 
-			{
-				src = static_cast<T*>(inputPixels) + y*width;
-				dst = static_cast<T*>(outputPixels) + offs_y;
-				offs_x = offs_x0;
-				for (int x = 0; x < width; ++x) 
-				{
-					dst[offs_x] = src[x];
-					offs_x = (offs_x - x_mask) & x_mask;
-				}
-				offs_y = (offs_y - y_mask) & y_mask;
-				if (offs_y == 0) offs_x0 += y_incr;
-			}
-		}
-		else 
-		{
-			for (int y = 0; y < height; ++y) 
-			{
-				src = static_cast<T*>(inputPixels) + offs_y;
-				dst = static_cast<T*>(outputPixels) + y*width;
-				offs_x = offs_x0;
-				for (int x = 0; x < width; ++x) 
-				{
-					dst[x] = src[offs_x];
-					offs_x = (offs_x - x_mask) & x_mask;
-				}
-				offs_y = (offs_y - y_mask) & y_mask;
-				if (offs_y == 0) offs_x0 += y_incr;
-			}
-		}
-	}
+		void write(const void *src, u32 width, u32 height, u32 pitch);
+		void read(void *dst, u32 width, u32 height, u32 pitch);
+	};
 
 	struct surface_info
 	{
 		u8 log2height;
 		u8 log2width;
-		u8 antialias;
-		u8 depth_format;
-		u8 color_format;
+		surface_antialiasing antialias;
+		surface_depth_format depth_format;
+		surface_color_format color_format;
 
 		u32 width;
 		u32 height;
@@ -228,9 +157,9 @@ namespace rsx
 
 			log2height = surface_format >> 24;
 			log2width = (surface_format >> 16) & 0xff;
-			antialias = (surface_format >> 12) & 0xf;
-			depth_format = (surface_format >> 5) & 0x7;
-			color_format = surface_format & 0x1f;
+			antialias = to_surface_antialiasing((surface_format >> 12) & 0xf);
+			depth_format = to_surface_depth_format((surface_format >> 5) & 0x7);
+			color_format = to_surface_color_format(surface_format & 0x1f);
 
 			width = 1 << (u32(log2width) + 1);
 			height = 1 << (u32(log2width) + 1);
@@ -242,24 +171,32 @@ namespace rsx
 		u16 frequency = 0;
 		u8 stride = 0;
 		u8 size = 0;
-		u8 type = CELL_GCM_VERTEX_F;
-		bool array = false;
+		vertex_base_type type = vertex_base_type::f;
 
-		void unpack(u32 data_array_format)
+		void unpack_array(u32 data_array_format)
 		{
 			frequency = data_array_format >> 16;
 			stride = (data_array_format >> 8) & 0xff;
 			size = (data_array_format >> 4) & 0xf;
-			type = data_array_format & 0xf;
+			type = to_vertex_base_type(data_array_format & 0xf);
 		}
 	};
 
-	class thread : public named_thread_t
+	enum class draw_command
+	{
+		array,
+		inlined_array,
+		indexed,
+	};
+
+	class thread : public named_thread
 	{
 	protected:
 		std::stack<u32> m_call_stack;
 
 	public:
+		struct shaders_cache shaders_cache;
+
 		CellGcmControl* ctrl = nullptr;
 
 		Timer timer_sync;
@@ -270,23 +207,43 @@ namespace rsx
 		rsx::texture textures[limits::textures_count];
 		rsx::vertex_texture vertex_textures[limits::vertex_textures_count];
 
+
+		/**
+		 * RSX can sources vertex attributes from 2 places:
+		 * - Immediate values passed by NV4097_SET_VERTEX_DATA*_M + ARRAY_ID write.
+		 * For a given ARRAY_ID the last command of this type defines the actual type of the immediate value.
+		 * Since there can be only a single value per ARRAY_ID passed this way, all vertex in the draw call
+		 * shares it.
+		 * - Vertex array values passed by offset/stride/size/format description.
+		 *
+		 * A given ARRAY_ID can have both an immediate value and a vertex array enabled at the same time
+		 * (See After Burner Climax intro cutscene). In such case the vertex array has precedence over the
+		 * immediate value. As soon as the vertex array is disabled (size set to 0) the immediate value
+		 * must be used if the vertex attrib mask request it.
+		 *
+		 * Note that behavior when both vertex array and immediate value system are disabled but vertex attrib mask
+		 * request inputs is unknow.
+		 */
+		data_array_format_info register_vertex_info[limits::vertex_count];
+		std::vector<u8> register_vertex_data[limits::vertex_count];
 		data_array_format_info vertex_arrays_info[limits::vertex_count];
-		std::vector<u8> vertex_arrays[limits::vertex_count];
-		std::vector<u8> vertex_index_array;
 		u32 vertex_draw_count = 0;
 
 		std::unordered_map<u32, color4_base<f32>> transform_constants;
+
+		/**
+		* Stores the first and count argument from draw/draw indexed parameters between begin/end clauses.
+		*/
+		std::vector<std::pair<u32, u32> > first_count_commands;
 
 		// Constant stored for whole frame
 		std::unordered_map<u32, color4f> local_transform_constants;
 
 		u32 transform_program[512 * 4] = {};
 
-		virtual void load_vertex_data(u32 first, u32 count);
-		virtual void load_vertex_index_data(u32 first, u32 count);
-
 		bool capture_current_frame = false;
 		void capture_frame(const std::string &name);
+
 	public:
 		u32 ioAddress, ioSize;
 		int flip_status;
@@ -300,20 +257,30 @@ namespace rsx
 		u32 gcm_buffers_count;
 		u32 gcm_current_buffer;
 		u32 ctxt_addr;
-		u32 report_main_addr;
 		u32 label_addr;
-		u32 draw_mode;
+		rsx::draw_command draw_command;
+		primitive_type draw_mode;
 
 		u32 local_mem_addr, main_mem_addr;
 		bool strict_ordering[0x1000];
 
+		bool draw_inline_vertex_array;
+		std::vector<u32> inline_vertex_array;
+
+		bool m_rtts_dirty;
+		bool m_transform_constants_dirty;
+		bool m_textures_dirty[16];
+	protected:
+		std::array<u32, 4> get_color_surface_addresses() const;
+		u32 get_zeta_surface_address() const;
+		RSXVertexProgram get_current_vertex_program() const;
+		RSXFragmentProgram get_current_fragment_program() const;
 	public:
 		u32 draw_array_count;
 		u32 draw_array_first;
 		double fps_limit = 59.94;
 
 	public:
-		semaphore_t sem_flip;
 		u64 last_flip_time;
 		vm::ps3::ptr<void(u32)> flip_handler = vm::null;
 		vm::ps3::ptr<void(u32)> user_handler = vm::null;
@@ -324,57 +291,91 @@ namespace rsx
 		std::set<u32> m_used_gcm_commands;
 
 	protected:
-		virtual ~thread() {}
+		thread();
+		virtual ~thread();
 
 		virtual void on_task() override;
 
 	public:
 		virtual std::string get_name() const override;
 
+		virtual void on_init() override {} // disable start() (TODO)
+		virtual void on_stop() override {} // disable join()
+
 		virtual void begin();
 		virtual void end();
 
-		virtual void on_init() = 0;
+		virtual void on_init_rsx() = 0;
 		virtual void on_init_thread() = 0;
 		virtual bool do_method(u32 cmd, u32 value) { return false; }
 		virtual void flip(int buffer) = 0;
 		virtual u64 timestamp() const;
+		virtual bool on_access_violation(u32 address, bool is_writing) { return false; }
+
+	private:
+		std::mutex m_mtx_task;
+
+		struct internal_task_entry
+		{
+			std::function<bool()> callback;
+			//std::promise<void> promise;
+
+			internal_task_entry(std::function<bool()> callback) : callback(callback)
+			{
+			}
+		};
+
+		std::deque<internal_task_entry> m_internal_tasks;
+		void do_internal_task();
+
+	public:
+		//std::future<void> add_internal_task(std::function<bool()> callback);
+		//void invoke(std::function<bool()> callback);
 
 		/**
 		 * Fill buffer with 4x4 scale offset matrix.
 		 * Vertex shader's position is to be multiplied by this matrix.
 		 * if is_d3d is set, the matrix is modified to use d3d convention.
 		 */
-		void fill_scale_offset_data(void *buffer, bool is_d3d = true) const noexcept;
+		void fill_scale_offset_data(void *buffer, bool is_d3d = true) const;
 
 		/**
 		* Fill buffer with vertex program constants.
 		* Buffer must be at least 512 float4 wide.
 		*/
-		void fill_vertex_program_constants_data(void *buffer) noexcept;
+		void fill_vertex_program_constants_data(void *buffer);
+
+		/**
+		* Write inlined array data to buffer.
+		* The storage of inlined data looks different from memory stored arrays.
+		* There is no swapping required except for 4 u8 (according to Bleach Soul Resurection)
+		*/
+		void write_inline_array_to_buffer(void *dst_buffer);
 
 		/**
 		 * Copy rtt values to buffer.
 		 * TODO: It's more efficient to combine multiple call of this function into one.
 		 */
-		virtual void copy_render_targets_to_memory(void *buffer, u8 rtt) {};
+		virtual std::array<std::vector<gsl::byte>, 4> copy_render_targets_to_memory() {
+			return  std::array<std::vector<gsl::byte>, 4>();
+		};
 
 		/**
-		* Copy depth content to buffer.
+		* Copy depth and stencil content to buffers.
 		* TODO: It's more efficient to combine multiple call of this function into one.
 		*/
-		virtual void copy_depth_buffer_to_memory(void *buffer) {};
-
-		/**
-		* Copy stencil content to buffer.
-		* TODO: It's more efficient to combine multiple call of this function into one.
-		*/
-		virtual void copy_stencil_buffer_to_memory(void *buffer) {};
+		virtual std::array<std::vector<gsl::byte>, 2> copy_depth_stencil_buffer_to_memory() {
+			return std::array<std::vector<gsl::byte>, 2>();
+		};
 
 		virtual std::pair<std::string, std::string> get_programs() const { return std::make_pair("", ""); };
+
 	public:
 		void reset();
 		void init(const u32 ioAddress, const u32 ioSize, const u32 ctrlAddress, const u32 localAddress);
+
+		tiled_region get_tiled_address(u32 offset, u32 location);
+		GcmTileInfo *find_tile(u32 offset, u32 location);
 
 		u32 ReadIO32(u32 addr);
 		void WriteIO32(u32 addr, u32 value);

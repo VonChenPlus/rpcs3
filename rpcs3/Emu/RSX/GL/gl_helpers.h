@@ -7,10 +7,10 @@
 #include <memory>
 #include <unordered_map>
 
-#include <glm/glm.hpp>
-#include <glm/gtc/type_ptr.hpp>
-
 #include "OpenGL.h"
+#include "../GCM.h"
+
+#include "Utilities/geometry.h"
 
 namespace gl
 {
@@ -51,6 +51,8 @@ namespace gl
 #else
 #define __glcheck
 #endif
+
+	void enable_debugging();
 
 	class exception : public std::exception
 	{
@@ -381,11 +383,12 @@ namespace gl
 
 	private:
 		GLuint m_id = GL_NONE;
-		GLsizei m_size = 0;
+		GLsizeiptr m_size = 0;
 		target m_target = target::array;
 
 	public:
 		buffer() = default;
+		buffer(const buffer&) = delete;
 
 		buffer(GLuint id)
 		{
@@ -493,7 +496,7 @@ namespace gl
 			m_id = 0;
 		}
 
-		GLsizei size() const
+		GLsizeiptr size() const
 		{
 			return m_size;
 		}
@@ -829,7 +832,8 @@ namespace gl
 		{
 			texture1D = GL_TEXTURE_1D,
 			texture2D = GL_TEXTURE_2D,
-			texture3D = GL_TEXTURE_3D
+			texture3D = GL_TEXTURE_3D,
+			textureBuffer = GL_TEXTURE_BUFFER
 		};
 
 		enum class channel_type
@@ -862,9 +866,10 @@ namespace gl
 				GLenum pname;
 				switch (new_binding.get_target())
 				{
-				case target::texture1D: pname = GL_TEXTURE_1D_BINDING_EXT; break;
-				case target::texture2D: pname = GL_TEXTURE_2D_BINDING_EXT; break;
-				case target::texture3D: pname = GL_TEXTURE_3D_BINDING_EXT; break;
+				case target::texture1D: pname = GL_TEXTURE_BINDING_1D; break;
+				case target::texture2D: pname = GL_TEXTURE_BINDING_2D; break;
+				case target::texture3D: pname = GL_TEXTURE_BINDING_3D; break;
+				case target::textureBuffer: pname = GL_TEXTURE_BINDING_BUFFER; break;
 				}
 
 				glGetIntegerv(pname, &m_last_binding);
@@ -1130,6 +1135,29 @@ namespace gl
 			__glcheck glTexSubImage2D((GLenum)get_target(), level(), 0, 0, width(), height(), (GLenum)format, (GLenum)type, src);
 		}
 
+		void copy_from(buffer &buf, u32 gl_format_type, u32 offset, u32 length)
+		{
+			if (get_target() != target::textureBuffer)
+				throw EXCEPTION("OpenGL error: texture cannot copy from buffer");
+
+			if (!offset)
+			{
+				copy_from(buf, gl_format_type);
+				return;
+			}
+
+			if (glTextureBufferRangeEXT == nullptr)
+				throw EXCEPTION("OpenGL error: partial buffer access for textures is unsupported on your system");
+
+			__glcheck glTextureBufferRangeEXT(id(), (GLenum)target::textureBuffer, gl_format_type, buf.id(), offset, length);
+		}
+
+		void copy_from(buffer &buf, u32 gl_format_type)
+		{
+			save_binding_state save(*this);
+			__glcheck glTexBuffer((GLenum)target::textureBuffer, gl_format_type, buf.id());
+		}
+
 		void copy_from(const buffer& buf, texture::format format, texture::type type, class pixel_unpack_settings pixel_settings)
 		{
 			buffer::save_binding_state save_buffer(buffer::target::pixel_unpack, buf);
@@ -1379,19 +1407,7 @@ namespace gl
 		settings& border_color(color4f value);
 	};
 
-	enum class draw_mode
-	{
-		points = GL_POINTS,
-		lines = GL_LINES,
-		line_loop = GL_LINE_LOOP,
-		line_strip = GL_LINE_STRIP,
-		triangles = GL_TRIANGLES,
-		triangle_strip = GL_TRIANGLE_STRIP,
-		triangle_fan = GL_TRIANGLE_FAN,
-		quads = GL_QUADS,
-		quad_strip = GL_QUAD_STRIP,
-		polygone = GL_POLYGON
-	};
+	GLenum draw_mode(rsx::primitive_type in);
 
 	enum class indices_type
 	{
@@ -1533,21 +1549,23 @@ namespace gl
 		void recreate();
 		void draw_buffer(const attachment& buffer) const;
 		void draw_buffers(const std::initializer_list<attachment>& indexes) const;
+		
+		void read_buffer(const attachment& buffer) const;
 
-		void draw_arrays(draw_mode mode, GLsizei count, GLint first = 0) const;
-		void draw_arrays(const buffer& buffer, draw_mode mode, GLsizei count, GLint first = 0) const;
-		void draw_arrays(const vao& buffer, draw_mode mode, GLsizei count, GLint first = 0) const;
+		void draw_arrays(rsx::primitive_type mode, GLsizei count, GLint first = 0) const;
+		void draw_arrays(const buffer& buffer, rsx::primitive_type mode, GLsizei count, GLint first = 0) const;
+		void draw_arrays(const vao& buffer, rsx::primitive_type mode, GLsizei count, GLint first = 0) const;
 
-		void draw_elements(draw_mode mode, GLsizei count, indices_type type, const GLvoid *indices) const;
-		void draw_elements(const buffer& buffer, draw_mode mode, GLsizei count, indices_type type, const GLvoid *indices) const;
-		void draw_elements(draw_mode mode, GLsizei count, indices_type type, const buffer& indices, size_t indices_buffer_offset = 0) const;
-		void draw_elements(const buffer& buffer_, draw_mode mode, GLsizei count, indices_type type, const buffer& indices, size_t indices_buffer_offset = 0) const;
-		void draw_elements(draw_mode mode, GLsizei count, const GLubyte *indices) const;
-		void draw_elements(const buffer& buffer, draw_mode mode, GLsizei count, const GLubyte *indices) const;
-		void draw_elements(draw_mode mode, GLsizei count, const GLushort *indices) const;
-		void draw_elements(const buffer& buffer, draw_mode mode, GLsizei count, const GLushort *indices) const;
-		void draw_elements(draw_mode mode, GLsizei count, const GLuint *indices) const;
-		void draw_elements(const buffer& buffer, draw_mode mode, GLsizei count, const GLuint *indices) const;
+		void draw_elements(rsx::primitive_type mode, GLsizei count, indices_type type, const GLvoid *indices) const;
+		void draw_elements(const buffer& buffer, rsx::primitive_type mode, GLsizei count, indices_type type, const GLvoid *indices) const;
+		void draw_elements(rsx::primitive_type mode, GLsizei count, indices_type type, const buffer& indices, size_t indices_buffer_offset = 0) const;
+		void draw_elements(const buffer& buffer_, rsx::primitive_type mode, GLsizei count, indices_type type, const buffer& indices, size_t indices_buffer_offset = 0) const;
+		void draw_elements(rsx::primitive_type mode, GLsizei count, const GLubyte *indices) const;
+		void draw_elements(const buffer& buffer, rsx::primitive_type mode, GLsizei count, const GLubyte *indices) const;
+		void draw_elements(rsx::primitive_type mode, GLsizei count, const GLushort *indices) const;
+		void draw_elements(const buffer& buffer, rsx::primitive_type mode, GLsizei count, const GLushort *indices) const;
+		void draw_elements(rsx::primitive_type mode, GLsizei count, const GLuint *indices) const;
+		void draw_elements(const buffer& buffer, rsx::primitive_type mode, GLsizei count, const GLuint *indices) const;
 
 		void clear(buffers buffers_) const;
 		void clear(buffers buffers_, color4f color_value, double depth_value, u8 stencil_value) const;
@@ -1759,23 +1777,6 @@ namespace gl
 				void operator = (const color4i& rhs) const { m_program.use(); glUniform4i(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
 				void operator = (const color4f& rhs) const { m_program.use(); glUniform4f(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
 				//void operator = (const color4d& rhs) const { m_program.use(); glUniform4d(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
-
-				void operator = (const glm::ivec2& rhs) const { m_program.use(); glUniform2i(location(), rhs.r, rhs.g); }
-				void operator = (const glm::vec2& rhs) const { m_program.use(); glUniform2f(location(), rhs.r, rhs.g); }
-				//void operator = (const glm::dvec2& rhs) const { m_program.use(); glUniform2d(location(), rhs.r, rhs.g); }
-				void operator = (const glm::ivec3& rhs) const { m_program.use(); glUniform3i(location(), rhs.r, rhs.g, rhs.b); }
-				void operator = (const glm::vec3& rhs) const { m_program.use(); glUniform3f(location(), rhs.r, rhs.g, rhs.b); }
-				//void operator = (const glm::dvec3& rhs) const { m_program.use(); glUniform3d(location(), rhs.r, rhs.g, rhs.b); }
-				void operator = (const glm::ivec4& rhs) const { m_program.use(); glUniform4i(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
-				void operator = (const glm::vec4& rhs) const { m_program.use(); glUniform4f(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
-				//void operator = (const glm::dvec4& rhs) const { m_program.use(); glUniform4d(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
-
-				void operator = (const glm::mat2& rhs) const { m_program.use(); glUniformMatrix2fv(location(), 1, GL_FALSE, glm::value_ptr(rhs)); }
-				//void operator = (const glm::dmat2& rhs) const { m_program.use(); glUniformMatrix2dv(location(), 1, GL_FALSE, glm::value_ptr(rhs)); }
-				void operator = (const glm::mat3& rhs) const { m_program.use(); glUniformMatrix3fv(location(), 1, GL_FALSE, glm::value_ptr(rhs)); }
-				//void operator = (const glm::dmat3& rhs) const { m_program.use(); glUniformMatrix3dv(location(), 1, GL_FALSE, glm::value_ptr(rhs)); }
-				void operator = (const glm::mat4& rhs) const { m_program.use(); glUniformMatrix4fv(location(), 1, GL_FALSE, glm::value_ptr(rhs)); }
-				//void operator = (const glm::dmat4& rhs) const { m_program.use(); glUniformMatrix4dv(location(), 1, GL_FALSE, glm::value_ptr(rhs)); }
 			};
 
 			class attrib_t
@@ -1806,13 +1807,6 @@ namespace gl
 				void operator = (const color3d& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib3d(location(), rhs.r, rhs.g, rhs.b); }
 				void operator = (const color4f& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib4f(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
 				void operator = (const color4d& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib4d(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
-
-				void operator = (const glm::vec2& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib2f(location(), rhs.r, rhs.g); }
-				void operator = (const glm::dvec2& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib2d(location(), rhs.r, rhs.g); }
-				void operator = (const glm::vec3& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib3f(location(), rhs.r, rhs.g, rhs.b); }
-				void operator = (const glm::dvec3& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib3d(location(), rhs.r, rhs.g, rhs.b); }
-				void operator = (const glm::vec4& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib4f(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
-				void operator = (const glm::dvec4& rhs) const { glDisableVertexAttribArray(location()); glVertexAttrib4d(location(), rhs.r, rhs.g, rhs.b, rhs.a); }
 
 				void operator =(buffer_pointer& pointer) const
 				{
@@ -2082,7 +2076,6 @@ namespace gl
 			void make()
 			{
 				link();
-				validate();
 			}
 
 			uint id() const
@@ -2148,7 +2141,7 @@ namespace gl
 			}
 
 			program() = default;
-			program(program&) = delete;
+			program(const program&) = delete;
 			program(program&& program_)
 			{
 				swap(program_);

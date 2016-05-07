@@ -4,14 +4,12 @@
 #include "../Common/ProgramStateCache.h"
 #include "D3D12VertexProgramDecompiler.h"
 #include "D3D12FragmentProgramDecompiler.h"
-#include "Utilities/File.h"
 
 struct D3D12PipelineProperties
 {
 	D3D12_PRIMITIVE_TOPOLOGY_TYPE Topology;
 	DXGI_FORMAT DepthStencilFormat;
 	DXGI_FORMAT RenderTargetsFormat;
-	std::vector<D3D12_INPUT_ELEMENT_DESC> IASet;
 	D3D12_BLEND_DESC Blend;
 	unsigned numMRT : 3;
 	D3D12_DEPTH_STENCIL_DESC DepthStencil;
@@ -20,23 +18,6 @@ struct D3D12PipelineProperties
 
 	bool operator==(const D3D12PipelineProperties &in) const
 	{
-		if (IASet.size() != in.IASet.size())
-			return false;
-		for (unsigned i = 0; i < IASet.size(); i++)
-		{
-			const D3D12_INPUT_ELEMENT_DESC &a = IASet[i], &b = in.IASet[i];
-			if (a.AlignedByteOffset != b.AlignedByteOffset)
-				return false;
-			if (a.Format != b.Format)
-				return false;
-			if (a.InputSlot != b.InputSlot)
-				return false;
-			if (a.InstanceDataStepRate != b.InstanceDataStepRate)
-				return false;
-			if (a.SemanticIndex != b.SemanticIndex)
-				return false;
-		}
-
 		if (memcmp(&DepthStencil, &in.DepthStencil, sizeof(D3D12_DEPTH_STENCIL_DESC)))
 			return false;
 		if (memcmp(&Blend, &in.Blend, sizeof(D3D12_BLEND_DESC)))
@@ -86,14 +67,15 @@ public:
 		SHADER_TYPE_FRAGMENT
 	};
 
-	Shader() : bytecode(nullptr) {}
-	~Shader() {}
+	Shader() = default;
+	~Shader() = default;
+	Shader(const Shader &) = delete;
 
 	u32 id;
 	ComPtr<ID3DBlob> bytecode;
 	// For debugging
 	std::string content;
-	std::vector<size_t> vertex_shader_inputs;
+	size_t vertex_shader_input_count;
 	std::vector<size_t> FragmentConstantOffsetCache;
 	size_t m_textureCount;
 
@@ -118,36 +100,18 @@ bool has_attribute(size_t attribute, const std::vector<D3D12_INPUT_ELEMENT_DESC>
 	return false;
 }
 
-static
-std::vector<D3D12_INPUT_ELEMENT_DESC> completes_IA_desc(const std::vector<D3D12_INPUT_ELEMENT_DESC> &desc, const std::vector<size_t> &inputs)
-{
-	std::vector<D3D12_INPUT_ELEMENT_DESC> result(desc);
-	for (size_t attribute : inputs)
-	{
-		if (has_attribute(attribute, desc))
-			continue;
-		D3D12_INPUT_ELEMENT_DESC extra_ia_desc = {};
-		extra_ia_desc.SemanticIndex = (UINT)attribute;
-		extra_ia_desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-		extra_ia_desc.SemanticName = "TEXCOORD";
-		extra_ia_desc.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-		result.push_back(extra_ia_desc);
-	}
-	return result;
-}
-
 struct D3D12Traits
 {
-	typedef Shader VertexProgramData;
-	typedef Shader FragmentProgramData;
-	typedef std::tuple<ID3D12PipelineState *, std::vector<size_t>, size_t> PipelineData;
-	typedef D3D12PipelineProperties PipelineProperties;
-	typedef std::pair<ID3D12Device *, ComPtr<ID3D12RootSignature> *> ExtraData;
+	using vertex_program_type = Shader;
+	using fragment_program_type  = Shader;
+	using pipeline_storage_type = std::tuple<ComPtr<ID3D12PipelineState>, size_t, size_t>;
+	using pipeline_properties  = D3D12PipelineProperties;
 
 	static
-	void RecompileFragmentProgram(RSXFragmentProgram *RSXFP, FragmentProgramData& fragmentProgramData, size_t ID)
+	void recompile_fragment_program(const RSXFragmentProgram &RSXFP, fragment_program_type& fragmentProgramData, size_t ID)
 	{
-		D3D12FragmentDecompiler FS(RSXFP->addr, RSXFP->size, RSXFP->ctrl, RSXFP->texture_dimensions);
+		u32 size;
+		D3D12FragmentDecompiler FS(RSXFP, size);
 		const std::string &shader = FS.Decompile();
 		fragmentProgramData.Compile(shader, Shader::SHADER_TYPE::SHADER_TYPE_FRAGMENT);
 		fragmentProgramData.m_textureCount = 0;
@@ -155,7 +119,7 @@ struct D3D12Traits
 		{
 			for (const ParamItem PI : PT.items)
 			{
-				if (PT.type == "sampler2D" || PT.type == "samplerCube")
+				if (PT.type == "sampler1D" || PT.type == "sampler2D" || PT.type == "samplerCube" || PT.type == "sampler3D")
 				{
 					size_t texture_unit = atoi(PI.name.c_str() + 3);
 					fragmentProgramData.m_textureCount = std::max(texture_unit + 1, fragmentProgramData.m_textureCount);
@@ -166,42 +130,40 @@ struct D3D12Traits
 			}
 		}
 
-		// TODO: This shouldn't use current dir
-		fs::file("./FragmentProgram" + std::to_string(ID) + ".hlsl", fom::rewrite) << shader;
+		fs::file(fs::get_config_dir() + "FragmentProgram" + std::to_string(ID) + ".hlsl", fs::rewrite).write(shader);
 		fragmentProgramData.id = (u32)ID;
 	}
 
 	static
-	void RecompileVertexProgram(RSXVertexProgram *RSXVP, VertexProgramData& vertexProgramData, size_t ID)
+	void recompile_vertex_program(const RSXVertexProgram &RSXVP, vertex_program_type& vertexProgramData, size_t ID)
 	{
-		D3D12VertexProgramDecompiler VS(RSXVP->data);
+		D3D12VertexProgramDecompiler VS(RSXVP);
 		std::string shaderCode = VS.Decompile();
 		vertexProgramData.Compile(shaderCode, Shader::SHADER_TYPE::SHADER_TYPE_VERTEX);
-		vertexProgramData.vertex_shader_inputs = VS.input_slots;
-		// TODO: This shouldn't use current dir
-		fs::file("./VertexProgram" + std::to_string(ID) + ".hlsl", fom::rewrite) << shaderCode;
+		vertexProgramData.vertex_shader_input_count = RSXVP.rsx_vertex_inputs.size();
+		fs::file(fs::get_config_dir() + "VertexProgram" + std::to_string(ID) + ".hlsl", fs::rewrite).write(shaderCode);
 		vertexProgramData.id = (u32)ID;
 	}
 
 	static
-	PipelineData *BuildProgram(VertexProgramData &vertexProgramData, FragmentProgramData &fragmentProgramData, const PipelineProperties &pipelineProperties, const ExtraData& extraData)
+	pipeline_storage_type build_pipeline(
+		const vertex_program_type &vertexProgramData, const fragment_program_type &fragmentProgramData, const pipeline_properties &pipelineProperties,
+		ID3D12Device *device, ID3D12RootSignature* root_signatures)
 	{
-
-		std::tuple<ID3D12PipelineState *, std::vector<size_t>, size_t> *result = new std::tuple<ID3D12PipelineState *, std::vector<size_t>, size_t>();
+		std::tuple<ID3D12PipelineState *, std::vector<size_t>, size_t> result = {};
 		D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicPipelineStateDesc = {};
 
 		if (vertexProgramData.bytecode == nullptr)
-			return nullptr;
+			throw EXCEPTION("Vertex program compilation failure");
 		graphicPipelineStateDesc.VS.BytecodeLength = vertexProgramData.bytecode->GetBufferSize();
 		graphicPipelineStateDesc.VS.pShaderBytecode = vertexProgramData.bytecode->GetBufferPointer();
 
 		if (fragmentProgramData.bytecode == nullptr)
-			return nullptr;
+			throw EXCEPTION("fragment program compilation failure");
 		graphicPipelineStateDesc.PS.BytecodeLength = fragmentProgramData.bytecode->GetBufferSize();
 		graphicPipelineStateDesc.PS.pShaderBytecode = fragmentProgramData.bytecode->GetBufferPointer();
 
-		graphicPipelineStateDesc.pRootSignature = extraData.second[fragmentProgramData.m_textureCount].Get();
-		std::get<2>(*result) = fragmentProgramData.m_textureCount;
+		graphicPipelineStateDesc.pRootSignature = root_signatures;
 
 		graphicPipelineStateDesc.BlendState = pipelineProperties.Blend;
 		graphicPipelineStateDesc.DepthStencilState = pipelineProperties.DepthStencil;
@@ -213,29 +175,21 @@ struct D3D12Traits
 			graphicPipelineStateDesc.RTVFormats[i] = pipelineProperties.RenderTargetsFormat;
 		graphicPipelineStateDesc.DSVFormat = pipelineProperties.DepthStencilFormat;
 
-		const std::vector<D3D12_INPUT_ELEMENT_DESC> &completed_IA_desc = completes_IA_desc(pipelineProperties.IASet, vertexProgramData.vertex_shader_inputs);
-
-		graphicPipelineStateDesc.InputLayout.pInputElementDescs = completed_IA_desc.data();
-		graphicPipelineStateDesc.InputLayout.NumElements = (UINT)completed_IA_desc.size();
 		graphicPipelineStateDesc.SampleDesc.Count = 1;
 		graphicPipelineStateDesc.SampleMask = UINT_MAX;
 		graphicPipelineStateDesc.NodeMask = 1;
 
 		graphicPipelineStateDesc.IBStripCutValue = pipelineProperties.CutValue;
 
-		extraData.first->CreateGraphicsPipelineState(&graphicPipelineStateDesc, IID_PPV_ARGS(&std::get<0>(*result)));
-		std::get<1>(*result) = vertexProgramData.vertex_shader_inputs;
-		return result;
-	}
+		ComPtr<ID3D12PipelineState> pso;
+		CHECK_HRESULT(device->CreateGraphicsPipelineState(&graphicPipelineStateDesc, IID_PPV_ARGS(pso.GetAddressOf())));
 
-	static
-	void DeleteProgram(PipelineData *ptr)
-	{
-		std::get<0>(*ptr)->Release();
-		delete ptr;
+		std::wstring name = L"PSO_" + std::to_wstring(vertexProgramData.id) + L"_" + std::to_wstring(fragmentProgramData.id);
+		pso->SetName(name.c_str());
+		return std::make_tuple(pso, vertexProgramData.vertex_shader_input_count, fragmentProgramData.m_textureCount);
 	}
 };
 
-class PipelineStateObjectCache : public ProgramStateCache<D3D12Traits>
+class PipelineStateObjectCache : public program_state_cache<D3D12Traits>
 {
 };

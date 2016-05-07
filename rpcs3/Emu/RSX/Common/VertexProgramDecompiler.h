@@ -1,6 +1,7 @@
 #pragma once
 #include "Emu/RSX/RSXVertexProgram.h"
 #include <vector>
+#include <set>
 #include <sstream>
 #include "ShaderParam.h"
 
@@ -19,6 +20,12 @@
 */
 struct VertexProgramDecompiler
 {
+	D0 d0;
+	D1 d1;
+	D2 d2;
+	D3 d3;
+	SRC src[3];
+
 	struct FuncInfo
 	{
 		u32 offset;
@@ -51,7 +58,7 @@ struct VertexProgramDecompiler
 
 	//wxString main;
 
-	std::vector<u32>& m_data;
+	const std::vector<u32>& m_data;
 	ParamArray m_parr;
 
 	std::string GetMask(bool is_sca);
@@ -118,6 +125,6 @@ protected:
 	*/
 	virtual void insertMainEnd(std::stringstream &OS) = 0;
 public:
-	VertexProgramDecompiler(std::vector<u32>& data);
+	VertexProgramDecompiler(const RSXVertexProgram& prog);
 	std::string Decompile();
 };

@@ -1,13 +1,9 @@
 #include "stdafx.h"
 #include "stdafx_gui.h"
-#include "Utilities/rPlatform.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 
 #include "MemoryStringSearcher.h"
-
-#include <wx/notebook.h>
 
 MemoryStringSearcher::MemoryStringSearcher(wxWindow* parent)
 	: wxDialog(parent, wxID_ANY, "String Searcher", wxDefaultPosition, wxSize(545, 64))

@@ -53,7 +53,7 @@ enum vec_opcode
 	RSX_VEC_OPCODE_TXL = 0x19
 };
 
-static union D0
+union D0
 {
 	u32 HEX;
 
@@ -80,9 +80,9 @@ static union D0
 		u32 vec_result           : 1;
 		u32                      : 1;
 	};
-} d0;
+};
 
-static union D1
+union D1
 {
 	u32 HEX;
 
@@ -94,9 +94,9 @@ static union D1
 		u32 vec_opcode : 5;
 		u32 sca_opcode : 5;
 	};
-} d1;
+};
 
-static union D2
+union D2
 {
 	u32 HEX;
 
@@ -111,9 +111,9 @@ static union D2
 		u32 iaddrh : 6;
 		u32        : 26;
 	};
-} d2;
+};
 
-static union D3
+union D3
 {
 	u32 HEX;
 
@@ -138,9 +138,9 @@ static union D3
 		u32                 : 29;
 		u32 iaddrl          : 3;
 	};
-} d3;
+};
 
-static union SRC
+union SRC
 {
 	union
 	{
@@ -174,7 +174,7 @@ static union SRC
 		u32 swz_x    : 2;
 		u32 neg      : 1;
 	};
-} src[3];
+};
 
 static const std::string rsx_vp_sca_op_names[] =
 {
@@ -190,7 +190,24 @@ static const std::string rsx_vp_vec_op_names[] =
 	"SEQ", "SFL", "SGT", "SLE", "SNE", "STR", "SSG", "NULL", "NULL", "TXL"
 };
 
+struct rsx_vertex_input
+{
+	u8 location; // between 0 and 15
+	u8 size; // between 1 and 4
+	u16 frequency;
+	bool is_modulo; // either modulo frequency or divide frequency
+	bool is_array; // false if "reg value"
+	bool int_type;
+
+	bool operator==(const rsx_vertex_input other) const
+	{
+		return location == other.location && size == other.size && frequency == other.frequency && is_modulo == other.is_modulo && is_array == other.is_array && int_type == other.int_type;
+	}
+};
+
 struct RSXVertexProgram
 {
 	std::vector<u32> data;
+	std::vector<rsx_vertex_input> rsx_vertex_inputs;
+	u32 output_mask;
 };

@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/System.h"
 
 #include "GLVertexProgram.h"
@@ -28,19 +27,44 @@ std::string GLVertexDecompilerThread::compareFunction(COMPARE f, const std::stri
 
 void GLVertexDecompilerThread::insertHeader(std::stringstream &OS)
 {
-	OS << "#version 420" << std::endl << std::endl;
+	OS << "#version 430" << std::endl << std::endl;
 	OS << "layout(std140, binding = 0) uniform ScaleOffsetBuffer" << std::endl;
 	OS << "{" << std::endl;
 	OS << "	mat4 scaleOffsetMat;" << std::endl;
+	OS << "	float fog_param0;\n";
+	OS << "	float fog_param1;\n";
 	OS << "};" << std::endl;
 }
 
 void GLVertexDecompilerThread::insertInputs(std::stringstream & OS, const std::vector<ParamType>& inputs)
 {
-	for (const ParamType PT : inputs)
+	std::vector<std::tuple<size_t, std::string>> input_data;
+	for (const ParamType &PT : inputs)
 	{
 		for (const ParamItem &PI : PT.items)
-			OS << /*"layout(location = " << PI.location << ") "*/  "in " << PT.type << " " << PI.name << ";" << std::endl;
+		{
+			input_data.push_back(std::make_tuple(PI.location, PI.name));
+		}
+	}
+
+	/**
+	 * Its is important that the locations are in the order that vertex attributes are expected.
+	 * If order is not adhered to, channels may be swapped leading to corruption
+	*/
+
+	std::sort(input_data.begin(), input_data.end());
+
+	int location = 1;
+	for (const std::tuple<size_t, std::string> item : input_data)
+	{
+		for (const ParamType &PT : inputs)
+		{
+			for (const ParamItem &PI : PT.items)
+			{
+				if (PI.name == std::get<1>(item))
+					OS << "layout(location=" << location++ << ")" << "	uniform samplerBuffer" << " " << PI.name << "_buffer;" << std::endl;
+			}
+		}
 	}
 }
 
@@ -68,7 +92,7 @@ static const reg_info reg_table[] =
 	{ "spec_color", true, "dst_reg2", "", false },
 	{ "front_diff_color", true, "dst_reg3", "", false },
 	{ "front_spec_color", true, "dst_reg4", "", false },
-	{ "fogc", true, "dst_reg5", ".x", true },
+	{ "fog_c", true, "dst_reg5", ".xxxx", true },
 	{ "gl_ClipDistance[0]", false, "dst_reg5", ".y", false },
 	{ "gl_ClipDistance[1]", false, "dst_reg5", ".z", false },
 	{ "gl_ClipDistance[2]", false, "dst_reg5", ".w", false },
@@ -94,17 +118,47 @@ void GLVertexDecompilerThread::insertOutputs(std::stringstream & OS, const std::
 	{
 		if (m_parr.HasParam(PF_PARAM_NONE, "vec4", i.src_reg) && i.need_declare)
 		{
-			if (i.name == "fogc")
-				OS << "out float " << i.name << ";" << std::endl;
-			else
-				OS << "out vec4 " << i.name << ";" << std::endl;
+			OS << "out vec4 " << i.name << ";" << std::endl;
 		}
 	}
 }
 
+void add_input(std::stringstream & OS, const ParamItem &PI, const std::vector<rsx_vertex_input> &inputs)
+{
+	for (const auto &real_input : inputs)
+	{
+		if (real_input.location != PI.location)
+			continue;
+
+		if (!real_input.is_array)
+		{
+			OS << "	vec4 " << PI.name << " = texelFetch(" << PI.name << "_buffer, 0);" << std::endl;
+			return;
+		}
+
+		if (real_input.frequency > 1)
+		{
+			if (real_input.is_modulo)
+			{
+				OS << "	vec4 " << PI.name << "= texelFetch(" << PI.name << "_buffer, gl_VertexID %" << real_input.frequency << ");" << std::endl;
+				return;
+			}
+
+			OS << "	vec4 " << PI.name << "= texelFetch(" << PI.name << "_buffer, gl_VertexID /" << real_input.frequency << ");" << std::endl;
+			return;
+		}
+
+		OS << "	vec4 " << PI.name << "= texelFetch(" << PI.name << "_buffer, gl_VertexID);" << std::endl;
+		return;
+	}
+
+	OS << "	vec4 " << PI.name << " = vec4(0., 0., 0., 1.);" << std::endl;
+}
 
 void GLVertexDecompilerThread::insertMainStart(std::stringstream & OS)
 {
+	insert_glsl_legacy_function(OS);
+
 	OS << "void main()" << std::endl;
 	OS << "{" << std::endl;
 
@@ -118,6 +172,12 @@ void GLVertexDecompilerThread::insertMainStart(std::stringstream & OS)
 				OS << " = " << PI.value;
 			OS << ";" << std::endl;
 		}
+	}
+
+	for (const ParamType &PT : m_parr.params[PF_PARAM_IN])
+	{
+		for (const ParamItem &PI : PT.items)
+			add_input(OS, PI, rsx_vertex_program.rsx_vertex_inputs);
 	}
 }
 
@@ -167,9 +227,9 @@ GLVertexProgram::~GLVertexProgram()
 //	}
 //}
 
-void GLVertexProgram::Decompile(RSXVertexProgram& prog)
+void GLVertexProgram::Decompile(const RSXVertexProgram& prog)
 {
-	GLVertexDecompilerThread decompiler(prog.data, shader, parr);
+	GLVertexDecompilerThread decompiler(prog, shader, parr);
 	decompiler.Task();
 }
 
@@ -201,7 +261,7 @@ void GLVertexProgram::Compile()
 	id = glCreateShader(GL_VERTEX_SHADER);
 
 	const char* str = shader.c_str();
-	const int strlen = shader.length();
+	const int strlen = ::narrow<int>(shader.length());
 
 	glShaderSource(id, 1, &str, &strlen);
 	glCompileShader(id);

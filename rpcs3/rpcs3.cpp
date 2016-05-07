@@ -1,26 +1,24 @@
 #include "stdafx.h"
 #include "stdafx_gui.h"
+#include "rpcs3.h"
+
+#include "Utilities/Config.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
-#include "Emu/state.h"
-#include "rpcs3.h"
-#include "Utilities/Log.h"
+
 #include "Gui/ConLogFrame.h"
 #include "Emu/GameInfo.h"
 
-#include "Emu/Io/Keyboard.h"
 #include "Emu/Io/Null/NullKeyboardHandler.h"
-#include "Emu/Io/Windows/WindowsKeyboardHandler.h"
+#include "BasicKeyboardHandler.h"
 
-#include "Emu/Io/Mouse.h"
 #include "Emu/Io/Null/NullMouseHandler.h"
-#include "Emu/Io/Windows/WindowsMouseHandler.h"
+#include "BasicMouseHandler.h"
 
-#include "Emu/Io/Pad.h"
 #include "Emu/Io/Null/NullPadHandler.h"
-#include "Emu/Io/Windows/WindowsPadHandler.h"
+#include "KeyboardPadHandler.h"
 #ifdef _MSC_VER
-#include "Emu/Io/XInput/XInputPadHandler.h"
+#include "XInputPadHandler.h"
 #endif
 
 #include "Emu/RSX/Null/NullGSRender.h"
@@ -33,13 +31,15 @@
 
 #include "Emu/RSX/Null/NullGSRender.h"
 #include "Emu/RSX/GL/GLGSRender.h"
+#include "Emu/Audio/Null/NullAudioThread.h"
+#include "Emu/Audio/AL/OpenALThread.h"
 #ifdef _MSC_VER
+#include "Emu/RSX/VK/VKGSRender.h"
 #include "Emu/RSX/D3D12/D3D12GSRender.h"
 #endif
 
-#include <wx/stdpaths.h>
-
 #ifdef _WIN32
+#include "Emu/Audio/XAudio2/XAudio2Thread.h"
 #include <wx/msw/wrapwin.h>
 #endif
 
@@ -47,10 +47,71 @@
 #include <X11/Xlib.h>
 #endif
 
+// GUI config
+YAML::Node g_gui_cfg;
+
+// GUI config file
+static fs::file s_gui_cfg;
+
+void save_gui_cfg()
+{
+	YAML::Emitter out;
+	out.SetSeqFormat(YAML::Flow);
+	out << g_gui_cfg;
+
+	// Save to file
+	s_gui_cfg.seek(0);
+	s_gui_cfg.trunc(0);
+	s_gui_cfg.write(out.c_str(), out.size());
+}
+
 wxDEFINE_EVENT(wxEVT_DBG_COMMAND, wxCommandEvent);
 
 IMPLEMENT_APP(Rpcs3App)
 Rpcs3App* TheApp;
+
+cfg::map_entry<std::function<std::shared_ptr<KeyboardHandlerBase>()>> g_cfg_kb_handler(cfg::root.io, "Keyboard",
+{
+	{ "Null", PURE_EXPR(std::make_shared<NullKeyboardHandler>()) },
+	{ "Basic", PURE_EXPR(std::make_shared<BasicKeyboardHandler>()) },
+});
+
+cfg::map_entry<std::function<std::shared_ptr<MouseHandlerBase>()>> g_cfg_mouse_handler(cfg::root.io, "Mouse",
+{
+	{ "Null", PURE_EXPR(std::make_shared<NullMouseHandler>()) },
+	{ "Basic", PURE_EXPR(std::make_shared<BasicMouseHandler>()) },
+});
+
+cfg::map_entry<std::function<std::shared_ptr<PadHandlerBase>()>> g_cfg_pad_handler(cfg::root.io, "Pad", "Keyboard",
+{
+	{ "Null", PURE_EXPR(std::make_shared<NullPadHandler>()) },
+	{ "Keyboard", PURE_EXPR(std::make_shared<KeyboardPadHandler>()) },
+#ifdef _MSC_VER
+	{ "XInput", PURE_EXPR(std::make_shared<XInputPadHandler>()) },
+#endif
+});
+
+cfg::map_entry<std::function<std::shared_ptr<GSRender>()>> g_cfg_gs_render(cfg::root.video, "Renderer", "OpenGL",
+{
+	{ "Null", PURE_EXPR(std::make_shared<NullGSRender>()) },
+	{ "OpenGL", PURE_EXPR(std::make_shared<GLGSRender>()) },
+#ifdef _MSC_VER
+	{ "DX12", PURE_EXPR(std::make_shared<D3D12GSRender>()) },
+	{ "Vulkan", PURE_EXPR(std::make_shared<VKGSRender>()) },
+#endif
+});
+
+cfg::map_entry<std::function<std::shared_ptr<AudioThread>()>> g_cfg_audio_render(cfg::root.audio, "Renderer", "OpenAL",
+{
+	{ "Null", PURE_EXPR(std::make_shared<NullAudioThread>()) },
+	{ "OpenAL", PURE_EXPR(std::make_shared<OpenALThread>()) },
+#ifdef _WIN32
+	{ "XAudio2", PURE_EXPR(std::make_shared<XAudio2Thread>()) },
+#endif
+});
+
+extern cfg::bool_entry g_cfg_autostart;
+extern cfg::bool_entry g_cfg_autoexit;
 
 bool Rpcs3App::OnInit()
 {
@@ -71,6 +132,9 @@ bool Rpcs3App::OnInit()
 		this->Exit();
 	}
 
+	s_gui_cfg.open(fs::get_config_dir() + "/config_gui.yml", fs::read + fs::write + fs::create);
+	g_gui_cfg = YAML::Load(s_gui_cfg.to_string());
+
 	EmuCallbacks callbacks;
 
 	callbacks.call_after = [](std::function<void()> func)
@@ -84,72 +148,42 @@ bool Rpcs3App::OnInit()
 		wxGetApp().ProcessPendingEvents();
 	};
 
-	callbacks.send_dbg_command = [](DbgCommand id, CPUThread* t)
+	callbacks.exit = [this]()
+	{
+		wxGetApp().Exit();
+	};
+
+	callbacks.send_dbg_command = [](DbgCommand id, cpu_thread* t)
 	{
 		wxGetApp().SendDbgCommand(id, t);
 	};
 
-	callbacks.get_kb_handler = []() -> std::unique_ptr<KeyboardHandlerBase>
-	{
-		switch (auto mode = rpcs3::config.io.keyboard_handler_mode.value())
-		{
-		case io_handler_mode::null: return std::make_unique<NullKeyboardHandler>();
-		case io_handler_mode::windows: return std::make_unique<WindowsKeyboardHandler>();
-		default: throw EXCEPTION("Invalid Keyboard Handler Mode %d", +(u32)mode);
-		}
-	};
+	callbacks.get_kb_handler = PURE_EXPR(g_cfg_kb_handler.get()());
 
-	callbacks.get_mouse_handler = []() -> std::unique_ptr<MouseHandlerBase>
-	{
-		switch (auto mode = rpcs3::config.io.mouse_handler_mode.value())
-		{
-		case io_handler_mode::null: return std::make_unique<NullMouseHandler>();
-		case io_handler_mode::windows: return std::make_unique<WindowsMouseHandler>();
-		default: throw EXCEPTION("Invalid Mouse Handler Mode %d", +(u32)mode);
-		}
-	};
+	callbacks.get_mouse_handler = PURE_EXPR(g_cfg_mouse_handler.get()());
 
-	callbacks.get_pad_handler = []() -> std::unique_ptr<PadHandlerBase>
-	{
-		switch (auto mode = rpcs3::config.io.pad_handler_mode.value())
-		{
-		case io_handler_mode::null: return std::make_unique<NullPadHandler>();
-		case io_handler_mode::windows: return std::make_unique<WindowsPadHandler>();
-#ifdef _MSC_VER
-		case io_handler_mode::xinput: return std::make_unique<XInputPadHandler>();
-#endif
-		default: throw EXCEPTION("Invalid Pad Handler Mode %d", (int)mode);
-		}
-	};
+	callbacks.get_pad_handler = PURE_EXPR(g_cfg_pad_handler.get()());
 
-	callbacks.get_gs_frame = [](frame_type type) -> std::unique_ptr<GSFrameBase>
+	callbacks.get_gs_frame = [](frame_type type, int w, int h) -> std::unique_ptr<GSFrameBase>
 	{
 		switch (type)
 		{
-		case frame_type::OpenGL: return std::make_unique<GLGSFrame>();
-		case frame_type::DX12: return std::make_unique<GSFrame>("DirectX 12");
-		case frame_type::Null: return std::make_unique<GSFrame>("Null");
+		case frame_type::OpenGL: return std::make_unique<GLGSFrame>(w, h);
+		case frame_type::DX12: return std::make_unique<GSFrame>("DirectX 12", w, h);
+		case frame_type::Null: return std::make_unique<GSFrame>("Null", w, h);
+		case frame_type::Vulkan: return std::make_unique<GSFrame>("Vulkan", w, h);
 		}
 
-		throw EXCEPTION("Invalid Frame Type");
+		throw EXCEPTION("Invalid Frame Type (0x%x)", type);
 	};
 
-	callbacks.get_gs_render = []() -> std::shared_ptr<GSRender>
-	{
-		switch (auto mode = rpcs3::state.config.rsx.renderer.value())
-		{
-		case rsx_renderer_type::Null: return std::make_shared<NullGSRender>();
-		case rsx_renderer_type::OpenGL: return std::make_shared<GLGSRender>();
-#ifdef _MSC_VER
-		case rsx_renderer_type::DX12: return std::make_shared<D3D12GSRender>();
-#endif
-		default: throw EXCEPTION("Invalid GS Renderer %d", (int)mode);
-		}
-	};
+	callbacks.get_gs_render = PURE_EXPR(g_cfg_gs_render.get()());
 
-	callbacks.get_msg_dialog = []() -> std::unique_ptr<MsgDialogBase>
+	callbacks.get_audio = PURE_EXPR(g_cfg_audio_render.get()());
+
+	callbacks.get_msg_dialog = []() -> std::shared_ptr<MsgDialogBase>
 	{
-		return std::make_unique<MsgDialogFrame>();
+		return std::make_shared<MsgDialogFrame>();
 	};
 
 	callbacks.get_save_dialog = []() -> std::unique_ptr<SaveDialogBase>
@@ -163,12 +197,7 @@ bool Rpcs3App::OnInit()
 	SetAppName(_PRGNAME_);
 	wxInitAllImageHandlers();
 
-	// RPCS3 assumes the current working directory is the folder where it is contained, so we make sure this is true
-	const wxString executablePath = wxPathOnly(wxStandardPaths::Get().GetExecutablePath());
-	wxSetWorkingDirectory(executablePath);
-
 	Emu.Init();
-	Emu.SetEmulatorPath(executablePath.ToStdString());
 
 	m_MainFrame = new MainFrame();
 	SetTopWindow(m_MainFrame);
@@ -188,13 +217,15 @@ void Rpcs3App::OnArguments(const wxCmdLineParser& parser)
 
 	if (parser.FoundSwitch("t"))
 	{
-		HLEExitOnStop = rpcs3::config.misc.exit_on_stop.value();
-		rpcs3::config.misc.exit_on_stop = true;
 		if (parser.GetParamCount() != 1)
 		{
-			wxLogDebug(wxT("A (S)ELF file needs to be given in test mode, exiting."));
+			wxLogDebug("A (S)ELF file needs to be given in test mode, exiting.");
 			this->Exit();
 		}
+
+		// TODO: clean implementation
+		g_cfg_autostart = true;
+		g_cfg_autoexit = true;
 	}
 	
 	if (parser.GetParamCount() > 0)
@@ -207,16 +238,11 @@ void Rpcs3App::OnArguments(const wxCmdLineParser& parser)
 
 void Rpcs3App::Exit()
 {
-	if (parser.FoundSwitch("t"))
-	{
-		rpcs3::config.misc.exit_on_stop = HLEExitOnStop;
-	}
-
 	Emu.Stop();
 	wxApp::Exit();
 }
 
-void Rpcs3App::SendDbgCommand(DbgCommand id, CPUThread* thr)
+void Rpcs3App::SendDbgCommand(DbgCommand id, cpu_thread* thr)
 {
 	wxCommandEvent event(wxEVT_DBG_COMMAND, id);
 	event.SetClientData(thr);

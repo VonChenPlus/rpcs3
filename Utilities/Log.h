@@ -1,134 +1,105 @@
 #pragma once
-#include "Utilities/MTRingbuffer.h"
 
-//#define BUFFERED_LOGGING 1
+#include "types.h"
+#include "Atomic.h"
 
-//first parameter is of type Log::LogType and text is of type std::string
-
-#define LOG_SUCCESS(logType, text, ...)           log_message(logType, Log::Severity::Success, text, ##__VA_ARGS__)
-#define LOG_NOTICE(logType, text, ...)            log_message(logType, Log::Severity::Notice,  text, ##__VA_ARGS__) 
-#define LOG_WARNING(logType, text, ...)           log_message(logType, Log::Severity::Warning, text, ##__VA_ARGS__) 
-#define LOG_ERROR(logType, text, ...)             log_message(logType, Log::Severity::Error,   text, ##__VA_ARGS__)
-
-namespace Log
+namespace _log
 {
-	const unsigned int MAX_LOG_BUFFER_LENGTH = 1024*1024;
-	const unsigned int gBuffSize = 1000;
-
-	enum LogType : u32
+	enum class level : uint
 	{
-		GENERAL = 0,
-		LOADER,
-		MEMORY,
-		RSX,
-		HLE,
-		PPU,
-		SPU,
-		ARMv7,
-		TTY,
+		always, // highest level (unused, cannot be disabled)
+		fatal,
+		error,
+		todo,
+		success,
+		warning,
+		notice,
+		trace, // lowest level (usually disabled)
 	};
 
-
-	struct LogTypeName
+	struct channel
 	{
-		LogType mType;
-		std::string mName;
-	};
+		// Channel prefix (added to every log message)
+		const char* const name;
 
-	//well I'd love make_array() but alas manually counting is not the end of the world
-	static const std::array<LogTypeName, 9> gTypeNameTable = { {
-			{ GENERAL, "G: " },
-			{ LOADER, "LDR: " },
-			{ MEMORY, "MEM: " },
-			{ RSX, "RSX: " },
-			{ HLE, "HLE: " },
-			{ PPU, "PPU: " },
-			{ SPU, "SPU: " },
-			{ ARMv7, "ARM: " },
-			{ TTY, "TTY: " }
-			} };
+		// The lowest logging level enabled for this channel (used for early filtering)
+		atomic_t<level> enabled;
 
-	enum class Severity : u32
-	{
-		Notice = 0,
-		Warning,
-		Success,
-		Error,
-	};
+		// Constant initialization: name and initial log level
+		constexpr channel(const char* name, level enabled = level::trace)
+			: name(name)
+			, enabled(enabled)
+		{
+		}
 
-	struct LogMessage
-	{
-		using size_type = u32;
-		LogType mType;
-		Severity mServerity;
-		std::string mText;
-
-		u32 size() const;
-		void serialize(char *output) const;
-		static LogMessage deserialize(char *input, u32* size_out=nullptr);
-	};
-
-	struct LogListener
-	{
-		virtual ~LogListener() {};
-		virtual void log(const LogMessage &msg) = 0;
-	};
-
-	struct LogChannel
-	{
-		LogChannel();
-		LogChannel(const std::string& name);
-		LogChannel(LogChannel& other) = delete;
-		void log(const LogMessage &msg);
-		void addListener(std::shared_ptr<LogListener> listener);
-		void removeListener(std::shared_ptr<LogListener> listener);
-		std::string name;
-	private:
-		bool mEnabled;
-		Severity mLogLevel;
-		std::mutex mListenerLock;
-		std::set<std::shared_ptr<LogListener>> mListeners;
-	};
-
-	struct LogManager
-	{
-		LogManager();
-		~LogManager();
-		static LogManager& getInstance();
-		LogChannel& getChannel(LogType type);
-		void log(LogMessage msg);
-		void addListener(std::shared_ptr<LogListener> listener);
-		void removeListener(std::shared_ptr<LogListener> listener);
-#ifdef BUFFERED_LOGGING
-		void consumeLog();
+		// Formatting function
+		template<typename... Args>
+		void format(level sev, const char* fmt, const Args&... args) const
+		{
+#ifdef _MSC_VER
+			if (sev <= enabled)
+#else
+			if (__builtin_expect(sev <= enabled, 0))
 #endif
+				broadcast(*this, sev, fmt, ::unveil<Args>::get(args)...);
+		}
+
+#define GEN_LOG_METHOD(_sev)\
+		template<typename... Args>\
+		void _sev(const char* fmt, const Args&... args) const\
+		{\
+			return format<Args...>(level::_sev, fmt, args...);\
+		}
+
+		GEN_LOG_METHOD(fatal)
+		GEN_LOG_METHOD(error)
+		GEN_LOG_METHOD(todo)
+		GEN_LOG_METHOD(success)
+		GEN_LOG_METHOD(warning)
+		GEN_LOG_METHOD(notice)
+		GEN_LOG_METHOD(trace)
+
+#undef GEN_LOG_METHOD
+
 	private:
-#ifdef BUFFERED_LOGGING
-		MTRingbuffer<char, MAX_LOG_BUFFER_LENGTH> mBuffer;
-		std::condition_variable mBufferReady;
-		std::mutex mStatusMut;
-		std::atomic<bool> mExiting;
-		std::thread mLogConsumer;
-#endif
-		std::array<LogChannel, std::tuple_size<decltype(gTypeNameTable)>::value> mChannels;
-		//std::array<LogChannel,gTypeNameTable.size()> mChannels; //TODO: use this once Microsoft sorts their shit out
+		// Send log message to global logger instance
+		static void broadcast(const channel& ch, level sev, const char* fmt...);
 	};
+
+	/* Small set of predefined channels */
+
+	extern channel GENERAL;
+	extern channel LOADER;
+	extern channel MEMORY;
+	extern channel RSX;
+	extern channel HLE;
+	extern channel PPU;
+	extern channel SPU;
+	extern channel ARMv7;
 }
 
-static struct { inline operator Log::LogType() { return Log::LogType::GENERAL; } } GENERAL;
-static struct { inline operator Log::LogType() { return Log::LogType::LOADER; } } LOADER;
-static struct { inline operator Log::LogType() { return Log::LogType::MEMORY; } } MEMORY;
-static struct { inline operator Log::LogType() { return Log::LogType::RSX; } } RSX;
-static struct { inline operator Log::LogType() { return Log::LogType::HLE; } } HLE;
-static struct { inline operator Log::LogType() { return Log::LogType::PPU; } } PPU;
-static struct { inline operator Log::LogType() { return Log::LogType::SPU; } } SPU;
-static struct { inline operator Log::LogType() { return Log::LogType::ARMv7; } } ARMv7;
-static struct { inline operator Log::LogType() { return Log::LogType::TTY; } } TTY;
-
-void log_message(Log::LogType type, Log::Severity sev, const char* text);
-void log_message(Log::LogType type, Log::Severity sev, std::string text);
-
-template<typename... Args> never_inline void log_message(Log::LogType type, Log::Severity sev, const char* fmt, Args... args)
+template<>
+struct bijective<_log::level, const char*>
 {
-	log_message(type, sev, fmt::format(fmt, fmt::do_unveil(args)...));
-}
+	static constexpr bijective_pair<_log::level, const char*> map[]
+	{
+		{ _log::level::always, "Nothing" },
+		{ _log::level::fatal, "Fatal" },
+		{ _log::level::error, "Error" },
+		{ _log::level::todo, "TODO" },
+		{ _log::level::success, "Success" },
+		{ _log::level::warning, "Warning" },
+		{ _log::level::notice, "Notice" },
+		{ _log::level::trace, "Trace" },
+	};
+};
+
+// Legacy:
+
+#define LOG_SUCCESS(ch, fmt, ...) _log::ch.success(fmt, ##__VA_ARGS__)
+#define LOG_NOTICE(ch, fmt, ...)  _log::ch.notice (fmt, ##__VA_ARGS__)
+#define LOG_WARNING(ch, fmt, ...) _log::ch.warning(fmt, ##__VA_ARGS__)
+#define LOG_ERROR(ch, fmt, ...)   _log::ch.error  (fmt, ##__VA_ARGS__)
+#define LOG_TODO(ch, fmt, ...)    _log::ch.todo   (fmt, ##__VA_ARGS__)
+#define LOG_TRACE(ch, fmt, ...)   _log::ch.trace  (fmt, ##__VA_ARGS__)
+#define LOG_FATAL(ch, fmt, ...)   _log::ch.fatal  (fmt, ##__VA_ARGS__)

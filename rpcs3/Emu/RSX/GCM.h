@@ -23,22 +23,196 @@ enum
 	CELL_GCM_DISPLAY_FREQUENCY_DISABLE = 3,
 };
 
-enum
+namespace rsx
 {
-	CELL_GCM_VERTEX_S1      = 1,
-	CELL_GCM_VERTEX_F       = 2,
-	CELL_GCM_VERTEX_SF      = 3,
-	CELL_GCM_VERTEX_UB      = 4,
-	CELL_GCM_VERTEX_S32K    = 5,
-	CELL_GCM_VERTEX_CMP     = 6,
-	CELL_GCM_VERTEX_UB256   = 7,
-};
+	enum class vertex_base_type : u8
+	{
+		s1, ///< signed byte
+		f, ///< float
+		sf, ///< half float
+		ub, ///< unsigned byte interpreted as 0.f and 1.f
+		s32k, ///< signed 32bits int
+		cmp, ///< compressed aka X11G11Z10 and always 1. W.
+		ub256, ///< unsigned byte interpreted as between 0 and 255.
+	};
 
-enum
-{
-	CELL_GCM_DRAW_INDEX_ARRAY_TYPE_32 = 0,
-	CELL_GCM_DRAW_INDEX_ARRAY_TYPE_16 = 1,
-};
+	vertex_base_type to_vertex_base_type(u8 in);
+
+	enum class index_array_type : u8
+	{
+		u32,
+		u16,
+	};
+
+	index_array_type to_index_array_type(u8 in);
+
+	enum class primitive_type : u8
+	{
+		points,
+		lines,
+		line_loop, // line strip with last end being joined with first end.
+		line_strip,
+		triangles,
+		triangle_strip,
+		triangle_fan, // like strip except that every triangle share the first vertex and one instead of 2 from previous triangle.
+		quads,
+		quad_strip,
+		polygon, // convex polygon
+	};
+
+	primitive_type to_primitive_type(u8 in);
+
+	enum class surface_target : u8
+	{
+		none,
+		surface_a,
+		surface_b,
+		surfaces_a_b,
+		surfaces_a_b_c,
+		surfaces_a_b_c_d,
+	};
+
+	surface_target to_surface_target(u8 in);
+
+	enum class surface_depth_format : u8
+	{
+		z16, // unsigned 16 bits depth
+		z24s8, // unsigned 24 bits depth + 8 bits stencil
+	};
+
+	surface_depth_format to_surface_depth_format(u8 in);
+
+	enum class surface_antialiasing : u8
+	{
+		center_1_sample,
+		diagonal_centered_2_samples,
+		square_centered_4_samples,
+		square_rotated_4_samples,
+	};
+
+	surface_antialiasing to_surface_antialiasing(u8 in);
+
+	enum class surface_color_format : u8
+	{
+		x1r5g5b5_z1r5g5b5,
+		x1r5g5b5_o1r5g5b5,
+		r5g6b5,
+		x8r8g8b8_z8r8g8b8,
+		x8r8g8b8_o8r8g8b8,
+		a8r8g8b8,
+		b8,
+		g8b8,
+		w16z16y16x16,
+		w32z32y32x32,
+		x32,
+		x8b8g8r8_z8b8g8r8,
+		x8b8g8r8_o8b8g8r8,
+		a8b8g8r8,
+	};
+
+	surface_color_format to_surface_color_format(u8 in);
+
+	enum class window_origin : u8
+	{
+		top,
+		bottom
+	};
+
+	window_origin to_window_origin(u8 in);
+
+	enum class window_pixel_center : u8
+	{
+		half,
+		integer
+	};
+
+	window_pixel_center to_window_pixel_center(u8 in);
+
+	enum class comparaison_function : u8
+	{
+		never,
+		less,
+		equal,
+		less_or_equal,
+		greater,
+		not_equal,
+		greater_or_equal,
+		always
+	};
+
+	comparaison_function to_comparaison_function(u16 in);
+
+	enum class fog_mode : u8
+	{
+		linear,
+		exponential,
+		exponential2,
+		exponential_abs,
+		exponential2_abs,
+		linear_abs
+	};
+
+	fog_mode to_fog_mode(u32 in);
+
+	enum class texture_dimension : u8
+	{
+		dimension1d,
+		dimension2d,
+		dimension3d,
+	};
+
+	texture_dimension to_texture_dimension(u8 in);
+
+	enum class texture_wrap_mode : u8
+	{
+		wrap,
+		mirror,
+		clamp_to_edge,
+		border,
+		clamp,
+		mirror_once_clamp_to_edge,
+		mirror_once_border,
+		mirror_once_clamp,
+	};
+
+	texture_wrap_mode to_texture_wrap_mode(u8 in);
+
+	enum class texture_max_anisotropy : u8
+	{
+		x1,
+		x2,
+		x4,
+		x6,
+		x8,
+		x10,
+		x12,
+		x16,
+	};
+
+	texture_max_anisotropy to_texture_max_anisotropy(u8 in);
+
+	enum class texture_minify_filter : u8
+	{
+		nearest, ///< no filtering, mipmap base level
+		linear, ///< linear filtering, mipmap base level
+		nearest_nearest, ///< no filtering, closest mipmap level
+		linear_nearest, ///< linear filtering, closest mipmap level
+		nearest_linear, ///< no filtering, linear mix between closest mipmap levels
+		linear_linear, ///< linear filtering, linear mix between closest mipmap levels
+		convolution_min, ///< Unknow mode but looks close to linear_linear
+	};
+
+	texture_minify_filter to_texture_minify_filter(u8 in);
+
+	enum class texture_magnify_filter : u8
+	{
+		nearest, ///< no filtering
+		linear, ///< linear filtering
+		convolution_mag, ///< Unknow mode but looks close to linear
+	};
+
+	texture_magnify_filter to_texture_magnify_filter(u8 in);
+}
 
 enum
 {
@@ -114,69 +288,14 @@ enum
 	// Normalization Flag
 	CELL_GCM_TEXTURE_NR = 0x00,
 	CELL_GCM_TEXTURE_UN = 0x40,
-
-	// Max Anisotropy
-	CELL_GCM_TEXTURE_MAX_ANISO_1  = 0,
-	CELL_GCM_TEXTURE_MAX_ANISO_2  = 1,
-	CELL_GCM_TEXTURE_MAX_ANISO_4  = 2,
-	CELL_GCM_TEXTURE_MAX_ANISO_6  = 3,
-	CELL_GCM_TEXTURE_MAX_ANISO_8  = 4,
-	CELL_GCM_TEXTURE_MAX_ANISO_10 = 5,
-	CELL_GCM_TEXTURE_MAX_ANISO_12 = 6,
-	CELL_GCM_TEXTURE_MAX_ANISO_16 = 7,
-
-	// Wrap
-	CELL_GCM_TEXTURE_WRAP                      = 1,
-	CELL_GCM_TEXTURE_MIRROR                    = 2,
-	CELL_GCM_TEXTURE_CLAMP_TO_EDGE             = 3,
-	CELL_GCM_TEXTURE_BORDER                    = 4,
-	CELL_GCM_TEXTURE_CLAMP                     = 5,
-	CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP_TO_EDGE = 6,
-	CELL_GCM_TEXTURE_MIRROR_ONCE_BORDER        = 7,
-	CELL_GCM_TEXTURE_MIRROR_ONCE_CLAMP         = 8,
 };
 
 // GCM Surface
 enum
 {
-	// Surface Target
-	CELL_GCM_SURFACE_TARGET_NONE   = 0,
-	CELL_GCM_SURFACE_TARGET_0      = 1,
-	CELL_GCM_SURFACE_TARGET_1      = 2,
-	CELL_GCM_SURFACE_TARGET_MRT1   = 0x13,
-	CELL_GCM_SURFACE_TARGET_MRT2   = 0x17,
-	CELL_GCM_SURFACE_TARGET_MRT3   = 0x1f,
-
-	// Surface Depth
-	CELL_GCM_SURFACE_Z16    = 1,
-	CELL_GCM_SURFACE_Z24S8  = 2,
-
-	// Surface Antialias
-	CELL_GCM_SURFACE_CENTER_1            = 0,
-	CELL_GCM_SURFACE_DIAGONAL_CENTERED_2 = 3,
-	CELL_GCM_SURFACE_SQUARE_CENTERED_4   = 4,
-	CELL_GCM_SURFACE_SQUARE_ROTATED_4    = 5,
-
 	// Surface type
 	CELL_GCM_SURFACE_PITCH    = 1,
 	CELL_GCM_SURFACE_SWIZZLE  = 2,
-
-	// Surface format
-	CELL_GCM_SURFACE_X1R5G5B5_Z1R5G5B5 = 1,
-	CELL_GCM_SURFACE_X1R5G5B5_O1R5G5B5 = 2,
-	CELL_GCM_SURFACE_R5G6B5            = 3,
-	CELL_GCM_SURFACE_X8R8G8B8_Z8R8G8B8 = 4,
-	CELL_GCM_SURFACE_X8R8G8B8_O8R8G8B8 = 5,
-	CELL_GCM_SURFACE_A8R8G8B8          = 8,
-	CELL_GCM_SURFACE_B8                = 9,
-	CELL_GCM_SURFACE_G8B8              = 10,
-	CELL_GCM_SURFACE_F_W16Z16Y16X16    = 11,
-	CELL_GCM_SURFACE_F_W32Z32Y32X32    = 12,
-	CELL_GCM_SURFACE_F_X32             = 13,
-	CELL_GCM_SURFACE_X8B8G8R8_Z8B8G8R8 = 14,
-	CELL_GCM_SURFACE_X8B8G8R8_O8B8G8R8 = 15,
-	CELL_GCM_SURFACE_A8B8G8R8          = 16,
-
 };
 
 enum
@@ -279,26 +398,6 @@ enum
 	CELL_GCM_TEXTURE_CYLINDRICAL_WRAP_ENABLE_TEX7_V = 1 << 29,
 	CELL_GCM_TEXTURE_CYLINDRICAL_WRAP_ENABLE_TEX7_P = 1 << 30,
 	CELL_GCM_TEXTURE_CYLINDRICAL_WRAP_ENABLE_TEX7_Q = 1 << 31,
-
-	// Texture Filter
-	CELL_GCM_TEXTURE_NEAREST = 1,
-	CELL_GCM_TEXTURE_LINEAR = 2,
-	CELL_GCM_TEXTURE_NEAREST_NEAREST = 3,
-	CELL_GCM_TEXTURE_LINEAR_NEAREST = 4,
-	CELL_GCM_TEXTURE_NEAREST_LINEAR = 5,
-	CELL_GCM_TEXTURE_LINEAR_LINEAR = 6,
-	CELL_GCM_TEXTURE_CONVOLUTION_MIN = 7,
-
-	CELL_GCM_PRIMITIVE_POINTS = 1,
-	CELL_GCM_PRIMITIVE_LINES = 2,
-	CELL_GCM_PRIMITIVE_LINE_LOOP = 3,
-	CELL_GCM_PRIMITIVE_LINE_STRIP = 4,
-	CELL_GCM_PRIMITIVE_TRIANGLES = 5,
-	CELL_GCM_PRIMITIVE_TRIANGLE_STRIP = 6,
-	CELL_GCM_PRIMITIVE_TRIANGLE_FAN = 7,
-	CELL_GCM_PRIMITIVE_QUADS = 8,
-	CELL_GCM_PRIMITIVE_QUAD_STRIP = 9,
-	CELL_GCM_PRIMITIVE_POLYGON = 10,
 
 	CELL_GCM_COLOR_MASK_B = 1 << 0,
 	CELL_GCM_COLOR_MASK_G = 1 << 8,
@@ -439,19 +538,16 @@ enum
 	CELL_GCM_ATTRIB_OUTPUT_MASK_TEX6 = 1 << 20,
 	CELL_GCM_ATTRIB_OUTPUT_MASK_TEX7 = 1 << 21,
 
-	CELL_GCM_FOG_MODE_LINEAR = 0x2601,
-	CELL_GCM_FOG_MODE_EXP = 0x0800,
-	CELL_GCM_FOG_MODE_EXP2 = 0x0801,
-	CELL_GCM_FOG_MODE_EXP_ABS = 0x0802,
-	CELL_GCM_FOG_MODE_EXP2_ABS = 0x0803,
-	CELL_GCM_FOG_MODE_LINEAR_ABS = 0x0804,
-
 	CELL_GCM_POLYGON_MODE_POINT = 0x1B00,
 	CELL_GCM_POLYGON_MODE_LINE = 0x1B01,
 	CELL_GCM_POLYGON_MODE_FILL = 0x1B02,
 
 	CELL_GCM_TRUE = 1,
-	CELL_GCM_FALSE = 0
+	CELL_GCM_FALSE = 0,
+
+	CELL_GCM_USER_CLIP_PLANE_DISABLE = 0,
+	CELL_GCM_USER_CLIP_PLANE_ENABLE_LT = 1,
+	CELL_GCM_USER_CLIP_PLANE_ENABLE_GE = 2,
 };
 
 enum
@@ -945,33 +1041,25 @@ enum Method
 
 namespace rsx
 {
-	template<typename ...T>
-	static auto make_command(u32 start_register, T... values) -> std::array<u32, sizeof...(values) + 1>
+	template<typename AT>
+	static inline u32 make_command(vm::_ptr_base<be_t<u32>, AT>& dst, u32 start_register, std::initializer_list<any32> values)
 	{
-		return{ (start_register << 2) | u32(sizeof...(values) << 18), u32(values)... };
-	}
+		*dst++ = start_register << 2 | static_cast<u32>(values.size()) << 18;
 
-	static u32 make_jump(u32 offset)
-	{
-		return CELL_GCM_METHOD_FLAG_JUMP | offset;
-	}
-
-	template<typename AT, typename ...T>
-	static size_t make_command(vm::ps3::ptr<u32, AT> &dst, u32 start_register, T... values)
-	{
-		for (u32 command : { (start_register << 2) | u32(sizeof...(values) << 18), u32(values)... })
+		for (const any32& cmd : values)
 		{
-			*dst++ = command;
+			*dst++ = cmd.as<u32>();
 		}
 
-		return sizeof...(values) + 1;
+		return SIZE_32(u32) * (static_cast<u32>(values.size()) + 1);
 	}
 
 	template<typename AT>
-	static size_t make_jump(vm::ps3::ptr<u32, AT> &dst, u32 offset)
+	static inline u32 make_jump(vm::_ptr_base<be_t<u32>, AT>& dst, u32 offset)
 	{
-		*dst++ = make_jump(offset);
-		return 1;
+		*dst++ = CELL_GCM_METHOD_FLAG_JUMP | offset;
+
+		return SIZE_32(u32);
 	}
 
 	std::string get_method_name(const u32 id);

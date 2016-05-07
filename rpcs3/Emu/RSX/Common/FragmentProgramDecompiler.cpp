@@ -1,17 +1,15 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 
 #include "FragmentProgramDecompiler.h"
 
-FragmentProgramDecompiler::FragmentProgramDecompiler(u32 addr, u32& size, u32 ctrl, const std::vector<texture_dimension> &texture_dimensions) :
-	m_addr(addr),
+FragmentProgramDecompiler::FragmentProgramDecompiler(const RSXFragmentProgram &prog, u32& size) :
+	m_prog(prog),
 	m_size(size),
 	m_const_index(0),
 	m_location(0),
-	m_ctrl(ctrl),
-	m_texture_dimensions(texture_dimensions)
+	m_ctrl(prog.ctrl)
 {
 	m_size = 0;
 }
@@ -115,7 +113,7 @@ std::string FragmentProgramDecompiler::AddConst()
 		return name;
 	}
 
-	auto data = vm::ps3::ptr<u32>::make(m_addr + m_size + 4 * sizeof32(u32));
+	auto data = (be_t<u32>*) ((char*)m_prog.addr + m_size + 4 * SIZE_32(u32));
 
 	m_offset = 2 * 4 * sizeof(u32);
 	u32 x = GetData(data[0]);
@@ -129,7 +127,23 @@ std::string FragmentProgramDecompiler::AddConst()
 
 std::string FragmentProgramDecompiler::AddTex()
 {
-	return m_parr.AddParam(PF_PARAM_UNIFORM, (m_texture_dimensions[dst.tex_num] == texture_dimension::texture_dimension_cubemap) ? "samplerCube" : "sampler2D", std::string("tex") + std::to_string(dst.tex_num));
+	std::string sampler;
+	switch (m_prog.get_texture_dimension(dst.tex_num))
+	{
+	case rsx::texture_dimension_extended::texture_dimension_1d:
+		sampler = "sampler1D";
+		break;
+	case rsx::texture_dimension_extended::texture_dimension_cubemap:
+		sampler = "samplerCube";
+		break;
+	case rsx::texture_dimension_extended::texture_dimension_2d:
+		sampler = "sampler2D";
+		break;
+	case rsx::texture_dimension_extended::texture_dimension_3d:
+		sampler = "sampler3D";
+		break;
+	}
+	return m_parr.AddParam(PF_PARAM_UNIFORM, sampler, std::string("tex") + std::to_string(dst.tex_num));
 }
 
 std::string FragmentProgramDecompiler::Format(const std::string& code)
@@ -260,7 +274,7 @@ template<typename T> std::string FragmentProgramDecompiler::GetSRC(T src)
 	{
 		static const std::string reg_table[] =
 		{
-			"gl_Position",
+			"gl_FragCoord",
 			"diff_color", "spec_color",
 			"fogc",
 			"tc0", "tc1", "tc2", "tc3", "tc4", "tc5", "tc6", "tc7", "tc8", "tc9",
@@ -341,8 +355,10 @@ bool FragmentProgramDecompiler::handle_sct(u32 opcode)
 	switch (opcode)
 	{
 	case RSX_FP_OPCODE_ADD: SetDst("($0 + $1)"); return true;
-	case RSX_FP_OPCODE_DIV: SetDst("($0 / $1)"); return true;
-	case RSX_FP_OPCODE_DIVSQ: SetDst("($0 / sqrt($1).xxxx)"); return true;
+	case RSX_FP_OPCODE_DIV: SetDst("($0 / $1.xxxx)"); return true;
+	// Note: DIVSQ is not IEEE compliant. divsq(0, 0) is 0 (Super Puzzle Fighter II Turbo HD Remix).
+	// sqrt(x, 0) might be equal to some big value (in absolute) whose sign is sign(x) but it has to be proven.
+	case RSX_FP_OPCODE_DIVSQ: SetDst("divsq_legacy($0, $1)"); return true;
 	case RSX_FP_OPCODE_DP2: SetDst(getFunction(FUNCTION::FUNCTION_DP2)); return true;
 	case RSX_FP_OPCODE_DP3: SetDst(getFunction(FUNCTION::FUNCTION_DP3)); return true;
 	case RSX_FP_OPCODE_DP4: SetDst(getFunction(FUNCTION::FUNCTION_DP4)); return true;
@@ -352,8 +368,11 @@ bool FragmentProgramDecompiler::handle_sct(u32 opcode)
 	case RSX_FP_OPCODE_MIN: SetDst("min($0, $1)"); return true;
 	case RSX_FP_OPCODE_MOV: SetDst("$0"); return true;
 	case RSX_FP_OPCODE_MUL: SetDst("($0 * $1)"); return true;
-	case RSX_FP_OPCODE_RCP: SetDst("1.0 / $0"); return true;
-	case RSX_FP_OPCODE_RSQ: SetDst("1.f / sqrt($0)"); return true;
+	// Note: It's higly likely that RCP is not IEEE compliant but a game that uses rcp(0) has to be found
+	case RSX_FP_OPCODE_RCP: SetDst("rcp_legacy($0)"); return true;
+	// Note: RSQ is not IEEE compliant. rsq(0) is some big number (Silent Hill 3 HD)
+	// It is not know what happens if 0 is negative.
+	case RSX_FP_OPCODE_RSQ: SetDst("rsq_legacy($0)"); return true;
 	case RSX_FP_OPCODE_SEQ: SetDst(getFloatTypeName(4) + "(" + compareFunction(COMPARE::FUNCTION_SEQ, "$0", "$1") + ")"); return true;
 	case RSX_FP_OPCODE_SFL: SetDst(getFunction(FUNCTION::FUNCTION_SFL)); return true;
 	case RSX_FP_OPCODE_SGE: SetDst(getFloatTypeName(4) + "(" + compareFunction(COMPARE::FUNCTION_SGE, "$0", "$1") + ")"); return true;
@@ -372,7 +391,10 @@ bool FragmentProgramDecompiler::handle_scb(u32 opcode)
 	{
 	case RSX_FP_OPCODE_ADD: SetDst("($0 + $1)"); return true;
 	case RSX_FP_OPCODE_COS: SetDst("cos($0.xxxx)"); return true;
-	case RSX_FP_OPCODE_DIVSQ: SetDst("($0 / sqrt($1).xxxx)"); return true;
+	case RSX_FP_OPCODE_DIV: SetDst("($0 / $1.xxxx)"); return true;
+	// Note: DIVSQ is not IEEE compliant. sqrt(0, 0) is 0 (Super Puzzle Fighter II Turbo HD Remix).
+	// sqrt(x, 0) might be equal to some big value (in absolute) whose sign is sign(x) but it has to be proven.
+	case RSX_FP_OPCODE_DIVSQ: SetDst("divsq_legacy($0, sqrt($1).xxxx)"); return true;
 	case RSX_FP_OPCODE_DP2: SetDst(getFunction(FUNCTION::FUNCTION_DP2)); return true;
 	case RSX_FP_OPCODE_DP3: SetDst(getFunction(FUNCTION::FUNCTION_DP3)); return true;
 	case RSX_FP_OPCODE_DP4: SetDst(getFunction(FUNCTION::FUNCTION_DP4)); return true;
@@ -382,7 +404,7 @@ bool FragmentProgramDecompiler::handle_scb(u32 opcode)
 	case RSX_FP_OPCODE_EX2: SetDst("exp2($0.xxxx)"); return true;
 	case RSX_FP_OPCODE_FLR: SetDst("floor($0)"); return true;
 	case RSX_FP_OPCODE_FRC: SetDst(getFunction(FUNCTION::FUNCTION_FRACT)); return true;
-	case RSX_FP_OPCODE_LIT: SetDst(getFloatTypeName(4) + "(1.0, $0.x, ($0.x > 0.0 ? exp($0.w * log2($0.y)) : 0.0), 1.0)"); return true;
+	case RSX_FP_OPCODE_LIT: SetDst("lit_legacy($0)"); return true;
 	case RSX_FP_OPCODE_LIF: SetDst(getFloatTypeName(4) + "(1.0, $0.y, ($0.y > 0 ? pow(2.0, $0.w) : 0.0), 1.0)"); return true;
 	case RSX_FP_OPCODE_LRP: LOG_ERROR(RSX, "Unimplemented SCB instruction: LRP"); return true; // TODO: Is this in the right category?
 	case RSX_FP_OPCODE_LG2: SetDst("log2($0.xxxx)"); return true;
@@ -418,42 +440,60 @@ bool FragmentProgramDecompiler::handle_tex_srb(u32 opcode)
 	case RSX_FP_OPCODE_NRM: SetDst("normalize($0)"); return true;
 	case RSX_FP_OPCODE_BEM: LOG_ERROR(RSX, "Unimplemented TEX_SRB instruction: BEM"); return true;
 	case RSX_FP_OPCODE_TEX:
-		if (dst.tex_num >= m_texture_dimensions.size())
+		switch (m_prog.get_texture_dimension(dst.tex_num))
 		{
-			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE));
+		case rsx::texture_dimension_extended::texture_dimension_1d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE1D));
 			return true;
-		}
-		switch (m_texture_dimensions[dst.tex_num])
-		{
-		case texture_dimension::texture_dimension_2d:
-			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE));
+		case rsx::texture_dimension_extended::texture_dimension_2d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE2D));
 			return true;
-		case texture_dimension::texture_dimension_cubemap:
-			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_CUBE_SAMPLE));
+		case rsx::texture_dimension_extended::texture_dimension_cubemap:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE));
+			return true;
+		case rsx::texture_dimension_extended::texture_dimension_3d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE3D));
 			return true;
 		}
 		return false;
 	case RSX_FP_OPCODE_TEXBEM: SetDst("texture($t, $0.xy, $1.x)"); return true;
 	case RSX_FP_OPCODE_TXP:
-		if (dst.tex_num >= m_texture_dimensions.size())
+		switch (m_prog.get_texture_dimension(dst.tex_num))
 		{
-			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE_PROJ));
+		case rsx::texture_dimension_extended::texture_dimension_1d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE1D_PROJ));
 			return true;
-		}
-		switch (m_texture_dimensions[dst.tex_num])
-		{
-		case texture_dimension::texture_dimension_2d:
-			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE_PROJ));
+		case rsx::texture_dimension_extended::texture_dimension_2d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE2D_PROJ));
 			return true;
-		case texture_dimension::texture_dimension_cubemap:
-			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_CUBE_SAMPLE_PROJ));
+		case rsx::texture_dimension_extended::texture_dimension_cubemap:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE_PROJ));
+			return true;
+		case rsx::texture_dimension_extended::texture_dimension_3d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE3D_PROJ));
 			return true;
 		}
 		return false;
 	case RSX_FP_OPCODE_TXPBEM: SetDst("textureProj($t, $0.xyz, $1.x)"); return true;
 	case RSX_FP_OPCODE_TXD: LOG_ERROR(RSX, "Unimplemented TEX_SRB instruction: TXD"); return true;
 	case RSX_FP_OPCODE_TXB: SetDst("texture($t, $0.xy, $1.x)"); return true;
-	case RSX_FP_OPCODE_TXL: SetDst("textureLod($t, $0.xy, $1.x)"); return true;
+	case RSX_FP_OPCODE_TXL:
+		switch (m_prog.get_texture_dimension(dst.tex_num))
+		{
+		case rsx::texture_dimension_extended::texture_dimension_1d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE1D_LOD));
+			return true;
+		case rsx::texture_dimension_extended::texture_dimension_2d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE2D_LOD));
+			return true;
+		case rsx::texture_dimension_extended::texture_dimension_cubemap:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLECUBE_LOD));
+			return true;
+		case rsx::texture_dimension_extended::texture_dimension_3d:
+			SetDst(getFunction(FUNCTION::FUNCTION_TEXTURE_SAMPLE3D_LOD));
+			return true;
+		}
+		return false;
 	case RSX_FP_OPCODE_UP2: SetDst("unpackSnorm2x16($0)"); return true; // TODO: More testing (Sonic The Hedgehog (NPUB-30442/NPEB-00478))
 	case RSX_FP_OPCODE_UP4: SetDst("unpackSnorm4x8($0)"); return true; // TODO: More testing (Sonic The Hedgehog (NPUB-30442/NPEB-00478))
 	case RSX_FP_OPCODE_UP16: LOG_ERROR(RSX, "Unimplemented TEX_SRB instruction: UP16"); return true;
@@ -465,7 +505,7 @@ bool FragmentProgramDecompiler::handle_tex_srb(u32 opcode)
 
 std::string FragmentProgramDecompiler::Decompile()
 {
-	auto data = vm::ps3::ptr<u32>::make(m_addr);
+	auto data = (be_t<u32>*) m_prog.addr;
 	m_size = 0;
 	m_location = 0;
 	m_loop_count = 0;
@@ -576,6 +616,8 @@ std::string FragmentProgramDecompiler::Decompile()
 		case RSX_FP_OPCODE_KIL: SetDst("discard", false); break;
 
 		default:
+			int prev_force_unit = forced_unit;
+
 			if (forced_unit == FORCE_NONE)
 			{
 				if (SIP()) break;
@@ -594,7 +636,7 @@ std::string FragmentProgramDecompiler::Decompile()
 				if (handle_scb(opcode)) break;
 			}
 
-			LOG_ERROR(RSX, "Unknown/illegal instruction: 0x%x (forced unit %d)", opcode, forced_unit);
+			LOG_ERROR(RSX, "Unknown/illegal instruction: 0x%x (forced unit %d)", opcode, prev_force_unit);
 			break;
 		}
 
@@ -602,7 +644,7 @@ std::string FragmentProgramDecompiler::Decompile()
 
 		if (dst.end) break;
 
-		assert(m_offset % sizeof(u32) == 0);
+		Ensures(m_offset % sizeof(u32) == 0);
 		data += m_offset / sizeof(u32);
 	}
 

@@ -1,53 +1,41 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Utilities/rXml.h"
-#include "Emu/FS/VFS.h"
-#include "Emu/FS/vfsFileBase.h"
 #include "Emu/System.h"
 #include "TROPUSR.h"
 
-TROPUSRLoader::TROPUSRLoader()
-{
-	m_file = NULL;
-	memset(&m_header, 0, sizeof(m_header));
-}
-
-TROPUSRLoader::~TROPUSRLoader()
-{
-	Close();
-}
-
 bool TROPUSRLoader::Load(const std::string& filepath, const std::string& configpath)
 {
-	if (m_file)
-	{
-		Close();
-	}
+	const std::string& path = vfs::get(filepath);
 
-	if (!Emu.GetVFS().ExistsFile(filepath))
+	if (!fs::is_file(path))
 	{
 		Generate(filepath, configpath);
 	}
 
-	m_file = Emu.GetVFS().OpenFile(filepath, fom::read);
-	LoadHeader();
-	LoadTableHeaders();
-	LoadTables();
+	if (!m_file.open(path, fs::read))
+	{
+		return false;
+	}
 
-	Close();
+	if (!LoadHeader() || !LoadTableHeaders() || !LoadTables())
+	{
+		return false;
+	}
+
+	m_file.release();
 	return true;
 }
 
 bool TROPUSRLoader::LoadHeader()
 {
-	if (!m_file->IsOpened())
+	if (!m_file)
 	{
 		return false;
 	}
 
-	m_file->Seek(0);
+	m_file.seek(0);
 
-	if (m_file->Read(&m_header, sizeof(TROPUSRHeader)) != sizeof(TROPUSRHeader))
+	if (!m_file.read(m_header))
 	{
 		return false;
 	}
@@ -57,18 +45,18 @@ bool TROPUSRLoader::LoadHeader()
 
 bool TROPUSRLoader::LoadTableHeaders()
 {
-	if (!m_file->IsOpened())
+	if (!m_file)
 	{
 		return false;
 	}
 
-	m_file->Seek(0x30);
+	m_file.seek(0x30);
 	m_tableHeaders.clear();
 	m_tableHeaders.resize(m_header.tables_count);
 
 	for (TROPUSRTableHeader& tableHeader : m_tableHeaders)
 	{
-		if (m_file->Read(&tableHeader, sizeof(TROPUSRTableHeader)) != sizeof(TROPUSRTableHeader))
+		if (!m_file.read(tableHeader))
 			return false;
 	}
 
@@ -77,14 +65,14 @@ bool TROPUSRLoader::LoadTableHeaders()
 
 bool TROPUSRLoader::LoadTables()
 {
-	if (!m_file->IsOpened())
+	if (!m_file)
 	{
 		return false;
 	}
 
 	for (const TROPUSRTableHeader& tableHeader : m_tableHeaders)
 	{
-		m_file->Seek(tableHeader.offset);
+		m_file.seek(tableHeader.offset);
 
 		if (tableHeader.type == 4)
 		{
@@ -93,7 +81,7 @@ bool TROPUSRLoader::LoadTables()
 
 			for (auto& entry : m_table4)
 			{
-				if (m_file->Read(&entry, sizeof(TROPUSREntry4)) != sizeof(TROPUSREntry4))
+				if (!m_file.read(entry))
 					return false;
 			}
 		}
@@ -105,7 +93,7 @@ bool TROPUSRLoader::LoadTables()
 
 			for (auto& entry : m_table6)
 			{
-				if (m_file->Read(&entry, sizeof(TROPUSREntry6)) != sizeof(TROPUSREntry6))
+				if (!m_file.read(entry))
 					return false;
 			}
 		}
@@ -119,39 +107,39 @@ bool TROPUSRLoader::LoadTables()
 // TODO: TROPUSRLoader::Save deletes the TROPUSR and creates it again. This is probably very slow.
 bool TROPUSRLoader::Save(const std::string& filepath)
 {
-	if (m_file)
+	if (!m_file.open(vfs::get(filepath), fs::rewrite))
 	{
-		Close();
+		return false;
 	}
 
-	m_file = Emu.GetVFS().OpenFile(filepath, fom::rewrite);
-	m_file->Write(&m_header, sizeof(TROPUSRHeader));
+	m_file.write(m_header);
 
 	for (const TROPUSRTableHeader& tableHeader : m_tableHeaders)
 	{
-		m_file->Write(&tableHeader, sizeof(TROPUSRTableHeader));
+		m_file.write(tableHeader);
 	}
 
 	for (const auto& entry : m_table4)
 	{
-		m_file->Write(&entry, sizeof(TROPUSREntry4));
+		m_file.write(entry);
 	}
 
 	for (const auto& entry : m_table6)
 	{
-		m_file->Write(&entry, sizeof(TROPUSREntry6));
+		m_file.write(entry);
 	}
 
-	m_file->Close();
-
+	m_file.release();
 	return true;
 }
 
 bool TROPUSRLoader::Generate(const std::string& filepath, const std::string& configpath)
 {
-	std::string path;
+	const std::string& path = vfs::get(configpath);
+
+	// TODO: rXmlDocument can open only real file
+	ASSERT(!fs::get_virtual_device(path));
 	rXmlDocument doc;
-	Emu.GetVFS().GetDevice(configpath.c_str(), path);
 	doc.Load(path);
 
 	m_table4.clear();
@@ -172,8 +160,8 @@ bool TROPUSRLoader::Generate(const std::string& filepath, const std::string& con
 			default: trophy_grade = 0;
 			}
 
-			TROPUSREntry4 entry4 = { 4, sizeof32(TROPUSREntry4) - 0x10, (u32)m_table4.size(), 0, trophy_id, trophy_grade, 0xFFFFFFFF };
-			TROPUSREntry6 entry6 = { 6, sizeof32(TROPUSREntry6) - 0x10, (u32)m_table6.size(), 0, trophy_id };
+			TROPUSREntry4 entry4 = { 4, SIZE_32(TROPUSREntry4) - 0x10, (u32)m_table4.size(), 0, trophy_id, trophy_grade, 0xFFFFFFFF };
+			TROPUSREntry6 entry6 = { 6, SIZE_32(TROPUSREntry6) - 0x10, (u32)m_table6.size(), 0, trophy_id };
 
 			m_table4.push_back(entry4);
 			m_table6.push_back(entry6);
@@ -181,9 +169,9 @@ bool TROPUSRLoader::Generate(const std::string& filepath, const std::string& con
 	}
 
 	u64 offset = sizeof(TROPUSRHeader) + 2 * sizeof(TROPUSRTableHeader);
-	TROPUSRTableHeader table4header = { 4, sizeof32(TROPUSREntry4) - 0x10, 1, (u32)m_table4.size(), offset };
+	TROPUSRTableHeader table4header = { 4, SIZE_32(TROPUSREntry4) - 0x10, 1, (u32)m_table4.size(), offset };
 	offset += m_table4.size() * sizeof(TROPUSREntry4);
-	TROPUSRTableHeader table6header = { 6, sizeof32(TROPUSREntry6) - 0x10, 1, (u32)m_table6.size(), offset };
+	TROPUSRTableHeader table6header = { 6, SIZE_32(TROPUSREntry6) - 0x10, 1, (u32)m_table6.size(), offset };
 	offset += m_table6.size() * sizeof(TROPUSREntry6);
 
 	m_tableHeaders.clear();
@@ -238,16 +226,4 @@ bool TROPUSRLoader::UnlockTrophy(u32 id, u64 timestamp1, u64 timestamp2)
 	m_table6[id].timestamp2 = timestamp2;
 
 	return true;
-}
-
-bool TROPUSRLoader::Close()
-{
-	if (m_file && m_file->Close())
-	{
-		delete m_file;
-		m_file = nullptr;
-		return true;
-	}
-
-	return false;
 }

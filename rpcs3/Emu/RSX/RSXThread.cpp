@@ -1,812 +1,99 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
+#include "Utilities/Config.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
-#include "Emu/state.h"
-#include "Emu/RSX/GSManager.h"
 #include "RSXThread.h"
 
-#include "Emu/SysCalls/Callback.h"
-#include "Emu/SysCalls/CB_FUNC.h"
-#include "Emu/SysCalls/lv2/sys_time.h"
+#include "Emu/Cell/PPUCallback.h"
 
 #include "Common/BufferUtils.h"
+#include "rsx_methods.h"
 
-#include "Utilities/types.h"
-
-extern "C"
-{
-#include "libswscale/swscale.h"
-}
+#include "Utilities/GSL.h"
+#include "Utilities/StrUtil.h"
 
 #define CMD_DEBUG 0
+
+cfg::bool_entry g_cfg_rsx_write_color_buffers(cfg::root.video, "Write Color Buffers");
+cfg::bool_entry g_cfg_rsx_write_depth_buffer(cfg::root.video, "Write Depth Buffer");
+cfg::bool_entry g_cfg_rsx_read_color_buffers(cfg::root.video, "Read Color Buffers");
+cfg::bool_entry g_cfg_rsx_read_depth_buffer(cfg::root.video, "Read Depth Buffer");
+cfg::bool_entry g_cfg_rsx_log_programs(cfg::root.video, "Log shader programs");
+cfg::bool_entry g_cfg_rsx_vsync(cfg::root.video, "VSync");
+cfg::bool_entry g_cfg_rsx_3dtv(cfg::root.video, "3D Monitor");
+cfg::bool_entry g_cfg_rsx_debug_output(cfg::root.video, "Debug output");
+cfg::bool_entry g_cfg_rsx_overlay(cfg::root.video, "Debug overlay");
 
 bool user_asked_for_frame_capture = false;
 frame_capture_data frame_debug;
 
+namespace vm { using namespace ps3; }
+
 namespace rsx
 {
-	using rsx_method_t = void(*)(thread*, u32);
+	std::function<bool(u32 addr, bool is_writing)> g_access_violation_handler;
 
-	u32 method_registers[0x10000 >> 2];
-	rsx_method_t methods[0x10000 >> 2]{};
-
-	template<typename Type> struct vertex_data_type_from_element_type;
-	template<> struct vertex_data_type_from_element_type<float> { enum { type = CELL_GCM_VERTEX_F }; };
-	template<> struct vertex_data_type_from_element_type<f16> { enum { type = CELL_GCM_VERTEX_SF }; };
-	template<> struct vertex_data_type_from_element_type<u8> { enum { type = CELL_GCM_VERTEX_UB }; };
-	template<> struct vertex_data_type_from_element_type<u16> { enum { type = CELL_GCM_VERTEX_S1 }; };
-
-	namespace nv406e
+	std::string shaders_cache::path_to_root()
 	{
-		force_inline void set_reference(thread* rsx, u32 arg)
-		{
-			rsx->ctrl->ref.exchange(arg);
-		}
-
-		force_inline void semaphore_acquire(thread* rsx, u32 arg)
-		{
-			//TODO: dma
-			while (vm::read32(rsx->label_addr + method_registers[NV406E_SEMAPHORE_OFFSET]) != arg)
-			{
-				if (Emu.IsStopped())
-					break;
-
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
-			}
-		}
-
-		force_inline void semaphore_release(thread* rsx, u32 arg)
-		{
-			//TODO: dma
-			vm::write32(rsx->label_addr + method_registers[NV406E_SEMAPHORE_OFFSET], arg);
-		}
+		return fs::get_executable_dir() + "data/";
 	}
 
-	namespace nv4097
+	void shaders_cache::load(const std::string &path, shader_language lang)
 	{
-		force_inline void texture_read_semaphore_release(thread* rsx, u32 arg)
+		const std::string lang_name = bijective_find<shader_language>(lang, "");
+
+		auto extract_hash = [](const std::string &string)
 		{
-			//TODO: dma
-			vm::write32(rsx->label_addr + method_registers[NV4097_SET_SEMAPHORE_OFFSET], arg);
-		}
-
-		force_inline void back_end_write_semaphore_release(thread* rsx, u32 arg)
-		{
-			//TODO: dma
-			vm::write32(rsx->label_addr + method_registers[NV4097_SET_SEMAPHORE_OFFSET],
-				(arg & 0xff00ff00) | ((arg & 0xff) << 16) | ((arg >> 16) & 0xff));
-		}
-
-		//fire only when all data passed to rsx cmd buffer
-		template<u32 id, u32 index, int count, typename type>
-		force_inline void set_vertex_data_impl(thread* rsx, u32 arg)
-		{
-			static const size_t element_size = (count * sizeof(type));
-			static const size_t element_size_in_words = element_size / sizeof(u32);
-
-			auto& info = rsx->vertex_arrays_info[index];
-
-			info.type = vertex_data_type_from_element_type<type>::type;
-			info.size = count;
-			info.frequency = 0;
-			info.stride = 0;
-			info.array = false;
-
-			auto& entry = rsx->vertex_arrays[index];
-
-			//find begin of data
-			size_t begin = id + index * element_size_in_words;
-
-			size_t position = entry.size();
-			entry.resize(position + element_size);
-
-			memcpy(entry.data() + position, method_registers + begin, element_size);
-		}
-
-		template<u32 index>
-		struct set_vertex_data4ub_m
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
-			{
-				set_vertex_data_impl<NV4097_SET_VERTEX_DATA4UB_M, index, 4, u8>(rsx, arg);
-			}
+			return std::stoull(string.substr(0, string.find('.')).c_str(), 0, 16);
 		};
 
-		template<u32 index>
-		struct set_vertex_data1f_m
+		for (const auto& entry : fs::dir(path))
 		{
-			force_inline static void impl(thread* rsx, u32 arg)
+			if (entry.name == "." || entry.name == "..")
+				continue;
+
+			u64 hash;
+
+			try
 			{
-				set_vertex_data_impl<NV4097_SET_VERTEX_DATA1F_M, index, 1, f32>(rsx, arg);
+				hash = extract_hash(entry.name);
 			}
-		};
-
-		template<u32 index>
-		struct set_vertex_data2f_m
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
+			catch (...)
 			{
-				set_vertex_data_impl<NV4097_SET_VERTEX_DATA2F_M, index, 2, f32>(rsx, arg);
-			}
-		};
-
-		template<u32 index>
-		struct set_vertex_data3f_m
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
-			{
-				set_vertex_data_impl<NV4097_SET_VERTEX_DATA3F_M, index, 3, f32>(rsx, arg);
-			}
-		};
-
-		template<u32 index>
-		struct set_vertex_data4f_m
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
-			{
-				set_vertex_data_impl<NV4097_SET_VERTEX_DATA4F_M, index, 4, f32>(rsx, arg);
-			}
-		};
-
-		template<u32 index>
-		struct set_vertex_data2s_m
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
-			{
-				set_vertex_data_impl<NV4097_SET_VERTEX_DATA2S_M, index, 2, u16>(rsx, arg);
-			}
-		};
-
-		template<u32 index>
-		struct set_vertex_data4s_m
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
-			{
-				set_vertex_data_impl<NV4097_SET_VERTEX_DATA4S_M, index, 4, u16>(rsx, arg);
-			}
-		};
-
-		template<u32 index>
-		struct set_vertex_data_array_format
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
-			{
-				auto& info = rsx->vertex_arrays_info[index];
-				info.unpack(arg);
-				info.array = info.size > 0;
-			}
-		};
-
-		force_inline void draw_arrays(thread* rsx, u32 arg)
-		{
-			u32 first = arg & 0xffffff;
-			u32 count = (arg >> 24) + 1;
-
-			rsx->load_vertex_data(first, count);
-		}
-
-		force_inline void draw_index_array(thread* rsx, u32 arg)
-		{
-			u32 first = arg & 0xffffff;
-			u32 count = (arg >> 24) + 1;
-
-			rsx->load_vertex_data(first, count);
-			rsx->load_vertex_index_data(first, count);
-		}
-
-		template<u32 index>
-		struct set_transform_constant
-		{
-			force_inline static void impl(thread* rsxthr, u32 arg)
-			{
-				u32 load = method_registers[NV4097_SET_TRANSFORM_CONSTANT_LOAD];
-
-				static const size_t count = 4;
-				static const size_t size = count * sizeof(f32);
-
-				size_t reg = index / 4;
-				size_t subreg = index % 4;
-
-				memcpy(rsxthr->transform_constants[load + reg].rgba + subreg, method_registers + NV4097_SET_TRANSFORM_CONSTANT + reg * count + subreg, sizeof(f32));
-			}
-		};
-
-		template<u32 index>
-		struct set_transform_program
-		{
-			force_inline static void impl(thread* rsx, u32 arg)
-			{
-				u32& load = method_registers[NV4097_SET_TRANSFORM_PROGRAM_LOAD];
-
-				static const size_t count = 4;
-				static const size_t size = count * sizeof(u32);
-
-				memcpy(rsx->transform_program + load++ * count, method_registers + NV4097_SET_TRANSFORM_PROGRAM + index * count, size);
-			}
-		};
-
-		force_inline void set_begin_end(thread* rsx, u32 arg)
-		{
-			if (arg)
-			{
-				rsx->begin();
-				return;
+				LOG_ERROR(RSX, "Cache file '%s' ignored", entry.name);
+				continue;
 			}
 
-			if (!rsx->vertex_draw_count)
+			if (fmt::match(entry.name, "*.fs." + lang_name))
 			{
-				bool has_array = false;
-
-				for (int i = 0; i < rsx::limits::vertex_count; ++i)
-				{
-					if (rsx->vertex_arrays_info[i].array)
-					{
-						has_array = true;
-						break;
-					}
-				}
-
-				if (!has_array)
-				{
-					u32 min_count = ~0;
-
-					for (int i = 0; i < rsx::limits::vertex_count; ++i)
-					{
-						if (!rsx->vertex_arrays_info[i].size)
-							continue;
-
-						u32 count = u32(rsx->vertex_arrays[i].size()) /
-							rsx::get_vertex_type_size(rsx->vertex_arrays_info[i].type) * rsx->vertex_arrays_info[i].size;
-
-						if (count < min_count)
-							min_count = count;
-					}
-
-					if (min_count && min_count < ~0)
-					{
-						rsx->vertex_draw_count = min_count;
-					}
-				}
+				fs::file file{ path + entry.name };
+				decompiled_fragment_shaders.insert(hash, { file.to_string() });
+				continue;
 			}
 
-			rsx->end();
-			rsx->vertex_draw_count = 0;
-		}
-
-		force_inline void get_report(thread* rsx, u32 arg)
-		{
-			u8 type = arg >> 24;
-			u32 offset = arg & 0xffffff;
-
-			//TODO: use DMA
-			vm::ptr<CellGcmReportData> result = { rsx->local_mem_addr + offset, vm::addr };
-
-			result->timer = rsx->timestamp();
-
-			switch (type)
+			if (fmt::match(entry.name, "*.vs." + lang_name))
 			{
-			case CELL_GCM_ZPASS_PIXEL_CNT:
-			case CELL_GCM_ZCULL_STATS:
-			case CELL_GCM_ZCULL_STATS1:
-			case CELL_GCM_ZCULL_STATS2:
-			case CELL_GCM_ZCULL_STATS3:
-				result->value = 0;
-				LOG_WARNING(RSX, "NV4097_GET_REPORT: Unimplemented type %d", type);
-				break;
-
-			default:
-				result->value = 0;
-				LOG_ERROR(RSX, "NV4097_GET_REPORT: Bad type %d", type);
-				break;
-			}
-
-			//result->padding = 0;
-		}
-
-		force_inline void clear_report_value(thread* rsx, u32 arg)
-		{
-			switch (arg)
-			{
-			case CELL_GCM_ZPASS_PIXEL_CNT:
-				LOG_WARNING(RSX, "TODO: NV4097_CLEAR_REPORT_VALUE: ZPASS_PIXEL_CNT");
-				break;
-			case CELL_GCM_ZCULL_STATS:
-				LOG_WARNING(RSX, "TODO: NV4097_CLEAR_REPORT_VALUE: ZCULL_STATS");
-				break;
-			default:
-				LOG_ERROR(RSX, "NV4097_CLEAR_REPORT_VALUE: Bad type: %d", arg);
-				break;
+				fs::file file{ path + entry.name };
+				decompiled_vertex_shaders.insert(hash, { file.to_string() });
+				continue;
 			}
 		}
 	}
 
-	namespace nv308a
+	void shaders_cache::load(shader_language lang)
 	{
-		template<u32 index>
-		struct color
+		std::string root = path_to_root();
+
+		//shared cache
+		load(root + "cache/", lang);
+
+		std::string title_id = Emu.GetTitleID();
+
+		if (!title_id.empty())
 		{
-			force_inline static void impl(u32 arg)
-			{
-				u32 point = method_registers[NV308A_POINT];
-				u16 x = point;
-				u16 y = point >> 16;
-
-				if (y)
-				{
-					LOG_ERROR(RSX, "%s: y is not null (0x%x)", __FUNCTION__, y);
-				}
-
-				u32 address = get_address(method_registers[NV3062_SET_OFFSET_DESTIN] + (x << 2) + index * 4, method_registers[NV3062_SET_CONTEXT_DMA_IMAGE_DESTIN]);
-				vm::write32(address, arg);
-			}
-		};
-	}
-
-	namespace nv3089
-	{
-		never_inline void image_in(u32 arg)
-		{
-			const u16 src_height = method_registers[NV3089_IMAGE_IN_SIZE] >> 16;
-			const u16 src_pitch = method_registers[NV3089_IMAGE_IN_FORMAT];
-			const u8 src_origin = method_registers[NV3089_IMAGE_IN_FORMAT] >> 16;
-			const u8 src_inter = method_registers[NV3089_IMAGE_IN_FORMAT] >> 24;
-			const u32 src_color_format = method_registers[NV3089_SET_COLOR_FORMAT];
-			const u32 operation = method_registers[NV3089_SET_OPERATION];
-
-			const u16 out_w = method_registers[NV3089_IMAGE_OUT_SIZE];
-			const u16 out_h = method_registers[NV3089_IMAGE_OUT_SIZE] >> 16;
-
-			// handle weird RSX quirk, doesn't report less than 16 pixels width in some cases 
-			u16 src_width = method_registers[NV3089_IMAGE_IN_SIZE];
-			if (src_width == 16 && out_w < 16 && method_registers[NV3089_DS_DX] == (1 << 20))
-			{
-				src_width = out_w;
-			}
-
-			const u16 u = method_registers[NV3089_IMAGE_IN]; // inX (currently ignored)
-			const u16 v = method_registers[NV3089_IMAGE_IN] >> 16; // inY (currently ignored)
-
-			if (src_origin != CELL_GCM_TRANSFER_ORIGIN_CORNER)
-			{
-				LOG_ERROR(RSX, "NV3089_IMAGE_IN_SIZE: unknown origin (%d)", src_origin);
-			}
-
-			if (src_inter != CELL_GCM_TRANSFER_INTERPOLATOR_ZOH && src_inter != CELL_GCM_TRANSFER_INTERPOLATOR_FOH)
-			{
-				LOG_ERROR(RSX, "NV3089_IMAGE_IN_SIZE: unknown inter (%d)", src_inter);
-			}
-
-			if (operation != CELL_GCM_TRANSFER_OPERATION_SRCCOPY)
-			{
-				LOG_ERROR(RSX, "NV3089_IMAGE_IN_SIZE: unknown operation (%d)", operation);
-			}
-
-			const u32 src_offset = method_registers[NV3089_IMAGE_IN_OFFSET];
-			const u32 src_dma = method_registers[NV3089_SET_CONTEXT_DMA_IMAGE];
-
-			u32 dst_offset;
-			u32 dst_dma = 0;
-			u16 dst_color_format;
-
-			switch (method_registers[NV3089_SET_CONTEXT_SURFACE])
-			{
-			case CELL_GCM_CONTEXT_SURFACE2D:
-				dst_dma = method_registers[NV3062_SET_CONTEXT_DMA_IMAGE_DESTIN];
-				dst_offset = method_registers[NV3062_SET_OFFSET_DESTIN];
-				dst_color_format = method_registers[NV3062_SET_COLOR_FORMAT];
-				break;
-
-			case CELL_GCM_CONTEXT_SWIZZLE2D:
-				dst_dma = method_registers[NV309E_SET_CONTEXT_DMA_IMAGE];
-				dst_offset = method_registers[NV309E_SET_OFFSET];
-				dst_color_format = method_registers[NV309E_SET_FORMAT];
-				break;
-
-			default:
-				LOG_ERROR(RSX, "NV3089_IMAGE_IN_SIZE: unknown m_context_surface (0x%x)", method_registers[NV3089_SET_CONTEXT_SURFACE]);
-				break;
-			}
-
-			if (!dst_dma)
-			{
-				LOG_ERROR(RSX, "dst_dma not set");
-				return;
-			}
-
-			LOG_ERROR(RSX, "NV3089_IMAGE_IN_SIZE: src = 0x%x, dst = 0x%x", src_offset, dst_offset);
-
-			u8* pixels_src = vm::_ptr<u8>(get_address(src_offset, src_dma));
-			u8* pixels_dst = vm::_ptr<u8>(get_address(dst_offset, dst_dma));
-
-			if (dst_color_format != CELL_GCM_TRANSFER_SURFACE_FORMAT_R5G6B5 &&
-				dst_color_format != CELL_GCM_TRANSFER_SURFACE_FORMAT_A8R8G8B8)
-			{
-				LOG_ERROR(RSX, "NV3089_IMAGE_IN_SIZE: unknown dst_color_format (%d)", dst_color_format);
-			}
-
-			if (src_color_format != CELL_GCM_TRANSFER_SCALE_FORMAT_R5G6B5 &&
-				src_color_format != CELL_GCM_TRANSFER_SCALE_FORMAT_A8R8G8B8)
-			{
-				LOG_ERROR(RSX, "NV3089_IMAGE_IN_SIZE: unknown src_color_format (%d)", src_color_format);
-			}
-
-			LOG_WARNING(RSX, "NV3089_IMAGE_IN_SIZE: SIZE=0x%08x, pitch=0x%x, offset=0x%x, scaleX=%f, scaleY=%f, CLIP_SIZE=0x%08x, OUT_SIZE=0x%08x",
-				method_registers[NV3089_IMAGE_IN_SIZE], src_pitch, src_offset, double(1 << 20) / (method_registers[NV3089_DS_DX]), double(1 << 20) / (method_registers[NV3089_DT_DY]),
-				method_registers[NV3089_CLIP_SIZE], method_registers[NV3089_IMAGE_OUT_SIZE]);
-
-			const u32 in_bpp = src_color_format == CELL_GCM_TRANSFER_SCALE_FORMAT_R5G6B5 ? 2 : 4; // bytes per pixel
-			const u32 out_bpp = dst_color_format == CELL_GCM_TRANSFER_SURFACE_FORMAT_R5G6B5 ? 2 : 4;
-
-			std::unique_ptr<u8[]> temp1, temp2;
-
-			// resize/convert if necessary
-			if (in_bpp != out_bpp && src_width != out_w && src_height != out_h)
-			{
-				temp1.reset(new u8[out_bpp * out_w * out_h]);
-
-				AVPixelFormat in_format = src_color_format == CELL_GCM_TRANSFER_SCALE_FORMAT_R5G6B5 ? AV_PIX_FMT_RGB565BE : AV_PIX_FMT_ARGB;
-				AVPixelFormat out_format = dst_color_format == CELL_GCM_TRANSFER_SURFACE_FORMAT_R5G6B5 ? AV_PIX_FMT_RGB565BE : AV_PIX_FMT_ARGB;
-
-				std::unique_ptr<SwsContext, void(*)(SwsContext*)> sws(sws_getContext(src_width, src_height, in_format, out_w, out_h, out_format,
-					src_inter ? SWS_FAST_BILINEAR : SWS_POINT, NULL, NULL, NULL), sws_freeContext);
-
-				int in_line = in_bpp * src_width;
-				u8* out_ptr = temp1.get();
-				int out_line = out_bpp * out_w;
-
-				sws_scale(sws.get(), &pixels_src, &in_line, 0, src_height, &out_ptr, &out_line);
-
-				pixels_src = out_ptr; // use resized image as a source
-			}
-
-			// Not sure if swizzle should be after clipping or not
-			if (method_registers[NV3089_SET_CONTEXT_SURFACE] == CELL_GCM_CONTEXT_SWIZZLE2D)
-			{
-				u8 sw_width_log2 = method_registers[NV309E_SET_FORMAT] >> 16;
-				u8 sw_height_log2 = method_registers[NV309E_SET_FORMAT] >> 24;
-
-				// 0 indicates height of 1 pixel
-				sw_height_log2 = sw_height_log2 == 0 ? 1 : sw_height_log2;
-
-				// swizzle based on destination size
-				u16 sw_width = 1 << sw_width_log2;
-				u16 sw_height = 1 << sw_height_log2;
-
-				std::unique_ptr<u8[]> sw_temp;
-
-				temp2.reset(new u8[out_bpp * sw_width * sw_height]);
-
-				u8* linear_pixels = pixels_src;
-				u8* swizzled_pixels = temp2.get();
-
-				// Check and pad texture out if we are given non square texture for swizzle to be correct
-				if (sw_width != out_w || sw_height != out_h)
-				{
-					sw_temp.reset(new u8[out_bpp * sw_width * sw_height]);
-
-					switch (out_bpp)
-					{
-					case 1:
-						pad_texture<u8>(linear_pixels, sw_temp.get(), out_w, out_h, sw_width, sw_height);
-						break;
-					case 2:
-						pad_texture<u16>(linear_pixels, sw_temp.get(), out_w, out_h, sw_width, sw_height);
-						break;
-					case 4:
-						pad_texture<u32>(linear_pixels, sw_temp.get(), out_w, out_h, sw_width, sw_height);
-						break;
-					}
-
-					linear_pixels = sw_temp.get();
-				}
-
-				switch (out_bpp)
-				{
-				case 1:
-					convert_linear_swizzle<u8>(linear_pixels, swizzled_pixels, sw_width, sw_height, false);
-					break;
-				case 2:
-					convert_linear_swizzle<u16>(linear_pixels, swizzled_pixels, sw_width, sw_height, false);
-					break;
-				case 4:
-					convert_linear_swizzle<u32>(linear_pixels, swizzled_pixels, sw_width, sw_height, false);
-					break;
-				}
-
-				//pixels_src = swizzled_pixels;
-
-				// TODO: Handle Clipping/Image out when swizzled
-				std::memcpy(pixels_dst, swizzled_pixels, out_bpp * sw_width * sw_height);
-				return;
-			}
-
-			// clip if necessary
-			if (method_registers[NV3089_CLIP_SIZE] != method_registers[NV3089_IMAGE_OUT_SIZE] ||
-				method_registers[NV3089_CLIP_POINT] || method_registers[NV3089_IMAGE_OUT_POINT])
-			{
-				// Note: There are cases currently where the if statement above is true, but this for loop doesn't hit, leading to nothing getting copied to pixels_dst
-				// Currently it seems needed to avoid some errors/crashes
-				for (s32 y = (method_registers[NV3089_CLIP_POINT] >> 16), dst_y = (method_registers[NV3089_IMAGE_OUT_POINT] >> 16); y < out_h; y++, dst_y++)
-				{
-					if (dst_y >= 0 && dst_y < method_registers[NV3089_IMAGE_OUT_SIZE] >> 16)
-					{
-						// destination line
-						u8* dst_line = pixels_dst + dst_y * out_bpp * (method_registers[NV3089_IMAGE_OUT_SIZE] & 0xffff)
-							+ std::min<s32>(std::max<s32>(method_registers[NV3089_IMAGE_OUT_POINT] & 0xffff, 0), method_registers[NV3089_IMAGE_OUT_SIZE] & 0xffff);
-
-						size_t dst_max = std::min<s32>(
-							std::max<s32>((s32)(method_registers[NV3089_IMAGE_OUT_SIZE] & 0xffff) - (method_registers[NV3089_IMAGE_OUT_POINT] & 0xffff), 0),
-							method_registers[NV3089_IMAGE_OUT_SIZE] & 0xffff) * out_bpp;
-
-						if (y >= 0 && y < std::min<s32>(method_registers[NV3089_CLIP_SIZE] >> 16, out_h))
-						{
-							// source line
-							u8* src_line = pixels_src + y * out_bpp * out_w +
-								std::min<s32>(std::max<s32>(method_registers[NV3089_CLIP_POINT] & 0xffff, 0), method_registers[NV3089_CLIP_SIZE] & 0xffff);
-							size_t src_max = std::min<s32>(
-								std::max<s32>((s32)(method_registers[NV3089_CLIP_SIZE] & 0xffff) - (method_registers[NV3089_CLIP_POINT] & 0xffff), 0),
-								method_registers[NV3089_CLIP_SIZE] & 0xffff) * out_bpp;
-
-							std::pair<u8*, size_t>
-								z0 = { src_line + 0, std::min<size_t>(dst_max, std::max<s64>(0, method_registers[NV3089_CLIP_POINT] & 0xffff)) },
-								d0 = { src_line + z0.second, std::min<size_t>(dst_max - z0.second, src_max) },
-								z1 = { src_line + d0.second, dst_max - z0.second - d0.second };
-
-							std::memset(z0.first, 0, z0.second);
-							std::memcpy(d0.first, src_line, d0.second);
-							std::memset(z1.first, 0, z1.second);
-						}
-						else
-						{
-							std::memset(dst_line, 0, dst_max);
-						}
-					}
-				}
-			}
-			else
-			{
-				std::memcpy(pixels_dst, pixels_src, out_w * out_h * out_bpp);
-			}
+			load(root + title_id + "/cache/", lang);
 		}
 	}
-
-	namespace nv0039
-	{
-		force_inline void buffer_notify(u32 arg)
-		{
-			const u32 inPitch = method_registers[NV0039_PITCH_IN];
-			const u32 outPitch = method_registers[NV0039_PITCH_OUT];
-			const u32 lineLength = method_registers[NV0039_LINE_LENGTH_IN];
-			const u32 lineCount = method_registers[NV0039_LINE_COUNT];
-			const u8 outFormat = method_registers[NV0039_FORMAT] >> 8;
-			const u8 inFormat = method_registers[NV0039_FORMAT];
-			const u32 notify = arg;
-
-			// The existing GCM commands use only the value 0x1 for inFormat and outFormat
-			if (inFormat != 0x01 || outFormat != 0x01)
-			{
-				LOG_ERROR(RSX, "NV0039_OFFSET_IN: Unsupported format: inFormat=%d, outFormat=%d", inFormat, outFormat);
-			}
-
-			if (lineCount == 1 && !inPitch && !outPitch && !notify)
-			{
-				std::memcpy(
-					vm::base(get_address(method_registers[NV0039_OFFSET_OUT], method_registers[NV0039_SET_CONTEXT_DMA_BUFFER_OUT])),
-					vm::base(get_address(method_registers[NV0039_OFFSET_IN], method_registers[NV0039_SET_CONTEXT_DMA_BUFFER_IN])),
-					lineLength);
-			}
-			else
-			{
-				LOG_ERROR(RSX, "NV0039_OFFSET_IN: bad offset(in=0x%x, out=0x%x), pitch(in=0x%x, out=0x%x), line(len=0x%x, cnt=0x%x), fmt(in=0x%x, out=0x%x), notify=0x%x",
-					method_registers[NV0039_OFFSET_IN], method_registers[NV0039_OFFSET_OUT], inPitch, outPitch, lineLength, lineCount, inFormat, outFormat, notify);
-			}
-		}
-	}
-
-	void flip_command(thread* rsx, u32 arg)
-	{
-		if (user_asked_for_frame_capture)
-		{
-			rsx->capture_current_frame = true;
-			user_asked_for_frame_capture = false;
-			frame_debug.reset();
-		}
-		else if (rsx->capture_current_frame)
-		{
-			rsx->capture_current_frame = false;
-			Emu.Pause();
-		}
-
-		rsx->gcm_current_buffer = arg;
-		rsx->flip(arg);
-		// After each flip PS3 system is executing a routine that changes registers value to some default.
-		// Some game use this default state (SH3).
-		rsx->reset();
-
-		rsx->last_flip_time = get_system_time() - 1000000;
-		rsx->gcm_current_buffer = arg;
-		rsx->flip_status = 0;
-
-		if (rsx->flip_handler)
-		{
-			Emu.GetCallbackManager().Async([func = rsx->flip_handler](PPUThread& ppu)
-			{
-				func(ppu, 1);
-			});
-		}
-
-		rsx->sem_flip.post_and_wait();
-
-		//sync
-		double limit;
-		switch (rpcs3::state.config.rsx.frame_limit.value())
-		{
-		case rsx_frame_limit::_50: limit = 50.; break;
-		case rsx_frame_limit::_59_94: limit = 59.94; break;
-		case rsx_frame_limit::_30: limit = 30.; break;
-		case rsx_frame_limit::_60: limit = 60.; break;
-		case rsx_frame_limit::Auto: limit = rsx->fps_limit; break; //TODO
-
-		case rsx_frame_limit::Off:
-		default:
-			return;
-		}
-
-		std::this_thread::sleep_for(std::chrono::milliseconds((s64)(1000.0 / limit - rsx->timer_sync.GetElapsedTimeInMilliSec())));
-		rsx->timer_sync.Start();
-		rsx->local_transform_constants.clear();
-	}
-
-	void user_command(thread* rsx, u32 arg)
-	{
-		if (rsx->user_handler)
-		{
-			Emu.GetCallbackManager().Async([func = rsx->user_handler, arg](PPUThread& ppu)
-			{
-				func(ppu, arg);
-			});
-		}
-		else
-		{
-			throw EXCEPTION("User handler not set");
-		}
-	}
-
-	struct __rsx_methods_t
-	{
-		using rsx_impl_method_t = void(*)(u32);
-
-		template<rsx_method_t impl_func>
-		force_inline static void call_impl_func(thread *rsx, u32 arg)
-		{
-			impl_func(rsx, arg);
-		}
-
-		template<rsx_impl_method_t impl_func>
-		force_inline static void call_impl_func(thread *rsx, u32 arg)
-		{
-			impl_func(arg);
-		}
-
-		template<int id, typename T, T impl_func>
-		static void wrapper(thread *rsx, u32 arg)
-		{
-			// try process using gpu
-			if (rsx->do_method(id, arg))
-			{
-				if (rsx->capture_current_frame && id == NV4097_CLEAR_SURFACE)
-					rsx->capture_frame("clear");
-				return;
-			}
-
-			// not handled by renderer
-			// try process using cpu
-			if (impl_func != nullptr)
-				call_impl_func<impl_func>(rsx, arg);
-		}
-
-		template<int id, int step, int count, template<u32> class T, int index = 0>
-		struct bind_range_impl_t
-		{
-			force_inline static void impl()
-			{
-				bind_range_impl_t<id + step, step, count, T, index + 1>::impl();
-				bind<id, T<index>::impl>();
-			}
-		};
-
-		template<int id, int step, int count, template<u32> class T>
-		struct bind_range_impl_t<id, step, count, T, count>
-		{
-			force_inline static void impl()
-			{
-			}
-		};
-
-		template<int id, int step, int count, template<u32> class T, int index = 0>
-		force_inline static void bind_range()
-		{
-			bind_range_impl_t<id, step, count, T, index>::impl();
-		}
-
-		[[noreturn]] never_inline static void bind_redefinition_error(int id)
-		{
-			throw EXCEPTION("RSX method implementation redefinition (0x%04x)", id);
-		}
-
-		template<int id, typename T, T impl_func>
-		static void bind_impl()
-		{
-			if (methods[id])
-			{
-				bind_redefinition_error(id);
-			}
-
-			methods[id] = wrapper<id, T, impl_func>;
-		}
-
-		template<int id, typename T, T impl_func>
-		static void bind_cpu_only_impl()
-		{
-			if (methods[id])
-			{
-				bind_redefinition_error(id);
-			}
-
-			methods[id] = call_impl_func<impl_func>;
-		}
-
-		template<int id, rsx_impl_method_t impl_func>       static void bind() { bind_impl<id, rsx_impl_method_t, impl_func>(); }
-		template<int id, rsx_method_t impl_func = nullptr>  static void bind() { bind_impl<id, rsx_method_t, impl_func>(); }
-
-		//do not try process on gpu
-		template<int id, rsx_impl_method_t impl_func>      static void bind_cpu_only() { bind_cpu_only_impl<id, rsx_impl_method_t, impl_func>(); }
-		//do not try process on gpu
-		template<int id, rsx_method_t impl_func = nullptr> static void bind_cpu_only() { bind_cpu_only_impl<id, rsx_method_t, impl_func>(); }
-
-		__rsx_methods_t()
-		{
-			// NV406E
-			bind_cpu_only<NV406E_SET_REFERENCE, nv406e::set_reference>();
-			bind<NV406E_SEMAPHORE_ACQUIRE, nv406e::semaphore_acquire>();
-			bind<NV406E_SEMAPHORE_RELEASE, nv406e::semaphore_release>();
-
-			// NV4097
-			bind<NV4097_TEXTURE_READ_SEMAPHORE_RELEASE, nv4097::texture_read_semaphore_release>();
-			bind<NV4097_BACK_END_WRITE_SEMAPHORE_RELEASE, nv4097::back_end_write_semaphore_release>();
-			bind<NV4097_SET_BEGIN_END, nv4097::set_begin_end>();
-			bind<NV4097_CLEAR_SURFACE>();
-			bind<NV4097_DRAW_ARRAYS, nv4097::draw_arrays>();
-			bind<NV4097_DRAW_INDEX_ARRAY, nv4097::draw_index_array>();
-			bind_range<NV4097_SET_VERTEX_DATA_ARRAY_FORMAT, 1, 16, nv4097::set_vertex_data_array_format>();
-			bind_range<NV4097_SET_VERTEX_DATA4UB_M, 1, 16, nv4097::set_vertex_data4ub_m>();
-			bind_range<NV4097_SET_VERTEX_DATA1F_M, 1, 16, nv4097::set_vertex_data1f_m>();
-			bind_range<NV4097_SET_VERTEX_DATA2F_M + 1, 2, 16, nv4097::set_vertex_data2f_m>();
-			bind_range<NV4097_SET_VERTEX_DATA3F_M + 2, 3, 16, nv4097::set_vertex_data3f_m>();
-			bind_range<NV4097_SET_VERTEX_DATA4F_M + 3, 4, 16, nv4097::set_vertex_data4f_m>();
-			bind_range<NV4097_SET_VERTEX_DATA2S_M, 1, 16, nv4097::set_vertex_data2s_m>();
-			bind_range<NV4097_SET_VERTEX_DATA4S_M + 1, 2, 16, nv4097::set_vertex_data4s_m>();
-			bind_range<NV4097_SET_TRANSFORM_CONSTANT, 1, 32, nv4097::set_transform_constant>();
-			bind_range<NV4097_SET_TRANSFORM_PROGRAM + 3, 4, 128, nv4097::set_transform_program>();
-			bind_cpu_only<NV4097_GET_REPORT, nv4097::get_report>();
-			bind_cpu_only<NV4097_CLEAR_REPORT_VALUE, nv4097::clear_report_value>();
-
-			//NV308A
-			bind_range<NV308A_COLOR, 1, 256, nv308a::color>();
-			bind_range<NV308A_COLOR + 256, 1, 512, nv308a::color, 256>();
-
-			//NV3089
-			bind<NV3089_IMAGE_IN, nv3089::image_in>();
-
-			//NV0039
-			bind<NV0039_BUFFER_NOTIFY, nv0039::buffer_notify>();
-
-			// custom methods
-			bind_cpu_only<GCM_FLIP_COMMAND, flip_command>();
-			bind_cpu_only<GCM_SET_USER_COMMAND, user_command>();
-		}
-	} __rsx_methods;
 
 	u32 get_address(u32 offset, u32 location)
 	{
@@ -831,7 +118,7 @@ namespace rsx
 				throw EXCEPTION("GetAddress(offset=0x%x, location=0x%x): RSXIO memory not mapped", offset, location);
 			}
 
-			//if (Emu.GetGSManager().GetRender().strict_ordering[offset >> 20])
+			//if (fxm::get<GSRender>()->strict_ordering[offset >> 20])
 			//{
 			//	_mm_mfence(); // probably doesn't have any effect on current implementation
 			//}
@@ -847,75 +134,167 @@ namespace rsx
 		return res;
 	}
 
-	u32 get_vertex_type_size(u32 type)
+	u32 get_vertex_type_size_on_host(vertex_base_type type, u32 size)
 	{
 		switch (type)
 		{
-		case CELL_GCM_VERTEX_S1:    return sizeof(u16);
-		case CELL_GCM_VERTEX_F:     return sizeof(f32);
-		case CELL_GCM_VERTEX_SF:    return sizeof(f16);
-		case CELL_GCM_VERTEX_UB:    return sizeof(u8);
-		case CELL_GCM_VERTEX_S32K:  return sizeof(u32);
-		case CELL_GCM_VERTEX_CMP:   return sizeof(u32);
-		case CELL_GCM_VERTEX_UB256: return sizeof(u8) * 4;
+		case vertex_base_type::s1:
+		case vertex_base_type::s32k:
+			switch (size)
+			{
+			case 1:
+			case 2:
+			case 4:
+				return sizeof(u16) * size;
+			case 3:
+				return sizeof(u16) * 4;
+			}
+			throw EXCEPTION("Wrong vector size");
+		case vertex_base_type::f: return sizeof(f32) * size;
+		case vertex_base_type::sf:
+			switch (size)
+			{
+			case 1:
+			case 2:
+			case 4:
+				return sizeof(f16) * size;
+			case 3:
+				return sizeof(f16) * 4;
+			}
+			throw EXCEPTION("Wrong vector size");
+		case vertex_base_type::ub:
+			switch (size)
+			{
+			case 1:
+			case 2:
+			case 4:
+				return sizeof(u8) * size;
+			case 3:
+				return sizeof(u8) * 4;
+			}
+			throw EXCEPTION("Wrong vector size");
+		case vertex_base_type::cmp: return sizeof(u16) * 4;
+		case vertex_base_type::ub256: Expects(size == 4); return sizeof(u8) * 4;
+		}
+		throw EXCEPTION("RSXVertexData::GetTypeSize: Bad vertex data type (%d)!", type);
+	}
 
+	void tiled_region::write(const void *src, u32 width, u32 height, u32 pitch)
+	{
+		if (!tile)
+		{
+			memcpy(ptr, src, height * pitch);
+			return;
+		}
+
+		u32 offset_x = base % tile->pitch;
+		u32 offset_y = base / tile->pitch;
+
+		switch (tile->comp)
+		{
+		case CELL_GCM_COMPMODE_C32_2X1:
+		case CELL_GCM_COMPMODE_DISABLED:
+			for (int y = 0; y < height; ++y)
+			{
+				memcpy(ptr + (offset_y + y) * tile->pitch + offset_x, (u8*)src + pitch * y, pitch);
+			}
+			break;
+			/*
+		case CELL_GCM_COMPMODE_C32_2X1:
+			for (u32 y = 0; y < height; ++y)
+			{
+				for (u32 x = 0; x < width; ++x)
+				{
+					u32 value = *(u32*)((u8*)src + pitch * y + x * sizeof(u32));
+
+					*(u32*)(ptr + (offset_y + y) * tile->pitch + offset_x + (x * 2 + 0) * sizeof(u32)) = value;
+					*(u32*)(ptr + (offset_y + y) * tile->pitch + offset_x + (x * 2 + 1) * sizeof(u32)) = value;
+				}
+			}
+			break;
+			*/
+		case CELL_GCM_COMPMODE_C32_2X2:
+			for (u32 y = 0; y < height; ++y)
+			{
+				for (u32 x = 0; x < width; ++x)
+				{
+					u32 value = *(u32*)((u8*)src + pitch * y + x * sizeof(u32));
+
+					*(u32*)(ptr + (offset_y + y * 2 + 0) * tile->pitch + offset_x + (x * 2 + 0) * sizeof(u32)) = value;
+					*(u32*)(ptr + (offset_y + y * 2 + 0) * tile->pitch + offset_x + (x * 2 + 1) * sizeof(u32)) = value;
+					*(u32*)(ptr + (offset_y + y * 2 + 1) * tile->pitch + offset_x + (x * 2 + 0) * sizeof(u32)) = value;
+					*(u32*)(ptr + (offset_y + y * 2 + 1) * tile->pitch + offset_x + (x * 2 + 1) * sizeof(u32)) = value;
+				}
+			}
+			break;
 		default:
-			LOG_ERROR(RSX, "RSXVertexData::GetTypeSize: Bad vertex data type (%d)!", type);
-			assert(0);
-			return 1;
+			throw;
 		}
 	}
 
-	void thread::load_vertex_data(u32 first, u32 count)
+	void tiled_region::read(void *dst, u32 width, u32 height, u32 pitch)
 	{
-		vertex_draw_count += count;
-
-		for (int index = 0; index < limits::vertex_count; ++index)
+		if (!tile)
 		{
-			const auto &info = vertex_arrays_info[index];
+			memcpy(dst, ptr, height * pitch);
+			return;
+		}
 
-			if (!info.array) // disabled or not a vertex array
-				continue;
+		u32 offset_x = base % tile->pitch;
+		u32 offset_y = base / tile->pitch;
 
-			auto &data = vertex_arrays[index];
+		switch (tile->comp)
+		{
+		case CELL_GCM_COMPMODE_C32_2X1:
+		case CELL_GCM_COMPMODE_DISABLED:
+			for (int y = 0; y < height; ++y)
+			{
+				memcpy((u8*)dst + pitch * y, ptr + (offset_y + y) * tile->pitch + offset_x, pitch);
+			}
+			break;
+			/*
+		case CELL_GCM_COMPMODE_C32_2X1:
+			for (u32 y = 0; y < height; ++y)
+			{
+				for (u32 x = 0; x < width; ++x)
+				{
+					u32 value = *(u32*)(ptr + (offset_y + y) * tile->pitch + offset_x + (x * 2 + 0) * sizeof(u32));
 
-			u32 type_size = get_vertex_type_size(info.type);
-			u32 element_size = type_size * info.size;
+					*(u32*)((u8*)dst + pitch * y + x * sizeof(u32)) = value;
+				}
+			}
+			break;
+			*/
+		case CELL_GCM_COMPMODE_C32_2X2:
+			for (u32 y = 0; y < height; ++y)
+			{
+				for (u32 x = 0; x < width; ++x)
+				{
+					u32 value = *(u32*)(ptr + (offset_y + y * 2 + 0) * tile->pitch + offset_x + (x * 2 + 0) * sizeof(u32));
 
-			u32 dst_position = (u32)data.size();
-			data.resize(dst_position + count * element_size);
-			write_vertex_array_data_to_buffer(data.data() + dst_position, first, count, index, info);
+					*(u32*)((u8*)dst + pitch * y + x * sizeof(u32)) = value;
+				}
+			}
+			break;
+		default:
+			throw;
 		}
 	}
 
-	void thread::load_vertex_index_data(u32 first, u32 count)
+	thread::thread()
 	{
-		u32 address = get_address(method_registers[NV4097_SET_INDEX_ARRAY_ADDRESS], method_registers[NV4097_SET_INDEX_ARRAY_DMA] & 0xf);
-		u32 type = method_registers[NV4097_SET_INDEX_ARRAY_DMA] >> 4;
-
-		u32 type_size = type == CELL_GCM_DRAW_INDEX_ARRAY_TYPE_32 ? sizeof(u32) : sizeof(u16);
-		u32 dst_offset = (u32)vertex_index_array.size();
-		vertex_index_array.resize(dst_offset + count * type_size);
-
-		u32 base_offset = method_registers[NV4097_SET_VERTEX_DATA_BASE_OFFSET];
-		u32 base_index = method_registers[NV4097_SET_VERTEX_DATA_BASE_INDEX];
-
-		switch (type)
+		g_access_violation_handler = [this](u32 address, bool is_writing)
 		{
-		case CELL_GCM_DRAW_INDEX_ARRAY_TYPE_32:
-			for (u32 i = 0; i < count; ++i)
-			{
-				(u32&)vertex_index_array[dst_offset + i * sizeof(u32)] = vm::read32(address + (first + i) * sizeof(u32));
-			}
-			break;
+			return on_access_violation(address, is_writing);
+		};
+		m_rtts_dirty = true;
+		memset(m_textures_dirty, -1, sizeof(m_textures_dirty));
+		m_transform_constants_dirty = true;
+	}
 
-		case CELL_GCM_DRAW_INDEX_ARRAY_TYPE_16:
-			for (u32 i = 0; i < count; ++i)
-			{
-				(u16&)vertex_index_array[dst_offset + i * sizeof(u16)] = vm::read16(address + (first + i) * sizeof(u16));
-			}
-			break;
-		}
+	thread::~thread()
+	{
+		g_access_violation_handler = nullptr;
 	}
 
 	void thread::capture_frame(const std::string &name)
@@ -924,44 +303,36 @@ namespace rsx
 
 		int clip_w = rsx::method_registers[NV4097_SET_SURFACE_CLIP_HORIZONTAL] >> 16;
 		int clip_h = rsx::method_registers[NV4097_SET_SURFACE_CLIP_VERTICAL] >> 16;
-		size_t pitch = clip_w * 4;
-		std::vector<size_t> color_index_to_record;
-		switch (method_registers[NV4097_SET_SURFACE_COLOR_TARGET])
+		rsx::surface_info surface = {};
+		surface.unpack(rsx::method_registers[NV4097_SET_SURFACE_FORMAT]);
+		draw_state.width = clip_w;
+		draw_state.height = clip_h;
+		draw_state.color_format = surface.color_format;
+		draw_state.color_buffer = std::move(copy_render_targets_to_memory());
+		draw_state.depth_format = surface.depth_format;
+		draw_state.depth_stencil = std::move(copy_depth_stencil_buffer_to_memory());
+
+		if (draw_command == rsx::draw_command::indexed)
 		{
-		case CELL_GCM_SURFACE_TARGET_0:
-			color_index_to_record = { 0 };
-			break;
-		case CELL_GCM_SURFACE_TARGET_1:
-			color_index_to_record = { 1 };
-			break;
-		case CELL_GCM_SURFACE_TARGET_MRT1:
-			color_index_to_record = { 0, 1 };
-			break;
-		case CELL_GCM_SURFACE_TARGET_MRT2:
-			color_index_to_record = { 0, 1, 2 };
-			break;
-		case CELL_GCM_SURFACE_TARGET_MRT3:
-			color_index_to_record = { 0, 1, 2, 3 };
-			break;
+			draw_state.vertex_count = 0;
+			for (const auto &range : first_count_commands)
+			{
+				draw_state.vertex_count += range.second;
+			}
+			draw_state.index_type = rsx::to_index_array_type(rsx::method_registers[NV4097_SET_INDEX_ARRAY_DMA] >> 4);
+
+			if (draw_state.index_type == rsx::index_array_type::u16)
+			{
+				draw_state.index.resize(2 * draw_state.vertex_count);
+			}
+			if (draw_state.index_type == rsx::index_array_type::u32)
+			{
+				draw_state.index.resize(4 * draw_state.vertex_count);
+			}
+			gsl::span<gsl::byte> dst = { (gsl::byte*)draw_state.index.data(), gsl::narrow<int>(draw_state.index.size()) };
+			write_index_array_data_to_buffer(dst, draw_state.index_type, draw_mode, first_count_commands);
 		}
-		for (size_t i : color_index_to_record)
-		{
-			draw_state.color_buffer[i].width = clip_w;
-			draw_state.color_buffer[i].height = clip_h;
-			draw_state.color_buffer[i].data.resize(pitch * clip_h);
-			copy_render_targets_to_memory(draw_state.color_buffer[i].data.data(), i);
-		}
-		if (get_address(method_registers[NV4097_SET_SURFACE_ZETA_OFFSET], method_registers[NV4097_SET_CONTEXT_DMA_ZETA]))
-		{
-			draw_state.depth.width = clip_w;
-			draw_state.depth.height = clip_h;
-			draw_state.depth.data.resize(clip_w * clip_h * 4);
-			copy_depth_buffer_to_memory(draw_state.depth.data.data());
-			draw_state.stencil.width = clip_w;
-			draw_state.stencil.height = clip_h;
-			draw_state.stencil.data.resize(clip_w * clip_h * 4);
-			copy_stencil_buffer_to_memory(draw_state.stencil.data.data());
-		}
+
 		draw_state.programs = get_programs();
 		draw_state.name = name;
 		frame_debug.draw_calls.push_back(draw_state);
@@ -969,19 +340,21 @@ namespace rsx
 
 	void thread::begin()
 	{
-		draw_mode = method_registers[NV4097_SET_BEGIN_END];
+		first_count_commands.clear();
+		draw_mode = to_primitive_type(method_registers[NV4097_SET_BEGIN_END]);
 	}
 
 	void thread::end()
 	{
-		vertex_index_array.clear();
-		for (auto &vertex_array : vertex_arrays)
-			vertex_array.clear();
-
 		transform_constants.clear();
 
 		if (capture_current_frame)
+		{
+			for (const auto &first_count : first_count_commands)
+				vertex_draw_count += first_count.second;
 			capture_frame("Draw " + std::to_string(vertex_draw_count));
+			vertex_draw_count = 0;
+		}
 	}
 
 	void thread::on_task()
@@ -992,7 +365,7 @@ namespace rsx
 
 		last_flip_time = get_system_time() - 1000000;
 
-		scope_thread_t vblank(PURE_EXPR("VBlank Thread"s), [this]()
+		scope_thread vblank("VBlank Thread", [this]()
 		{
 			const u64 start_time = get_system_time();
 
@@ -1025,12 +398,12 @@ namespace rsx
 		{
 			CHECK_EMU_STATUS;
 
-			be_t<u32> get = ctrl->get;
-			be_t<u32> put = ctrl->put;
+			const u32 get = ctrl->get;
+			const u32 put = ctrl->put;
 
 			if (put == get || !Emu.IsRunning())
 			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(1)); // hack
+				do_internal_task();
 				continue;
 			}
 
@@ -1073,7 +446,7 @@ namespace rsx
 
 			if (cmd & 0x3)
 			{
-				LOG_WARNING(Log::RSX, "unaligned command: %s (0x%x from 0x%x)", get_method_name(first_cmd).c_str(), first_cmd, cmd & 0xffff);
+				LOG_WARNING(RSX, "unaligned command: %s (0x%x from 0x%x)", get_method_name(first_cmd).c_str(), first_cmd, cmd & 0xffff);
 			}
 
 			for (u32 i = 0; i < count; i++)
@@ -1081,10 +454,7 @@ namespace rsx
 				u32 reg = cmd & CELL_GCM_METHOD_FLAG_NON_INCREMENT ? first_cmd : first_cmd + i;
 				u32 value = args[i];
 
-				if (rpcs3::config.misc.log.rsx_logging.value())
-				{
-					LOG_NOTICE(Log::RSX, "%s(0x%x) = 0x%x", get_method_name(reg).c_str(), reg, value);
-				}
+				LOG_TRACE(RSX, "%s(0x%x) = 0x%x", get_method_name(reg).c_str(), reg, value);
 
 				method_registers[reg] = value;
 				if (capture_current_frame)
@@ -1103,7 +473,7 @@ namespace rsx
 		return "rsx::thread"s;
 	}
 
-	void thread::fill_scale_offset_data(void *buffer, bool is_d3d) const noexcept
+	void thread::fill_scale_offset_data(void *buffer, bool is_d3d) const
 	{
 		int clip_w = rsx::method_registers[NV4097_SET_SURFACE_CLIP_HORIZONTAL] >> 16;
 		int clip_h = rsx::method_registers[NV4097_SET_SURFACE_CLIP_VERTICAL] >> 16;
@@ -1134,7 +504,7 @@ namespace rsx
 	* Fill buffer with vertex program constants.
 	* Buffer must be at least 512 float4 wide.
 	*/
-	void thread::fill_vertex_program_constants_data(void *buffer) noexcept
+	void thread::fill_vertex_program_constants_data(void *buffer)
 	{
 		for (const auto &entry : transform_constants)
 			local_transform_constants[entry.first] = entry.second;
@@ -1142,10 +512,235 @@ namespace rsx
 			stream_vector_from_memory((char*)buffer + entry.first * 4 * sizeof(float), (void*)entry.second.rgba);
 	}
 
+	void thread::write_inline_array_to_buffer(void *dst_buffer)
+	{
+		u8* src = reinterpret_cast<u8*>(inline_vertex_array.data());
+		u8* dst = (u8*)dst_buffer;
+
+		size_t bytes_written = 0;
+		while (bytes_written < inline_vertex_array.size() * sizeof(u32))
+		{
+			for (int index = 0; index < rsx::limits::vertex_count; ++index)
+			{
+				const auto &info = vertex_arrays_info[index];
+
+				if (!info.size) // disabled
+					continue;
+
+				u32 element_size = rsx::get_vertex_type_size_on_host(info.type, info.size);
+
+				if (info.type == vertex_base_type::ub && info.size == 4)
+				{
+					dst[0] = src[3];
+					dst[1] = src[2];
+					dst[2] = src[1];
+					dst[3] = src[0];
+				}
+				else
+					memcpy(dst, src, element_size);
+
+				src += element_size;
+				dst += element_size;
+
+				bytes_written += element_size;
+			}
+		}
+	}
+
 	u64 thread::timestamp() const
 	{
 		// Get timestamp, and convert it from microseconds to nanoseconds
 		return get_system_time() * 1000;
+	}
+
+	void thread::do_internal_task()
+	{
+		if (m_internal_tasks.empty())
+		{
+			std::this_thread::sleep_for(1ms);
+		}
+		else
+		{
+			Expects(0);
+			//std::lock_guard<std::mutex> lock{ m_mtx_task };
+
+			//internal_task_entry &front = m_internal_tasks.front();
+
+			//if (front.callback())
+			//{
+			//	front.promise.set_value();
+			//	m_internal_tasks.pop_front();
+			//}
+		}
+	}
+
+	//std::future<void> thread::add_internal_task(std::function<bool()> callback)
+	//{
+	//	std::lock_guard<std::mutex> lock{ m_mtx_task };
+	//	m_internal_tasks.emplace_back(callback);
+
+	//	return m_internal_tasks.back().promise.get_future();
+	//}
+
+	//void thread::invoke(std::function<bool()> callback)
+	//{
+	//	if (operator->() == thread_ctrl::get_current())
+	//	{
+	//		while (true)
+	//		{
+	//			if (callback())
+	//			{
+	//				break;
+	//			}
+	//		}
+	//	}
+	//	else
+	//	{
+	//		add_internal_task(callback).wait();
+	//	}
+	//}
+
+	namespace
+	{
+		bool is_int_type(rsx::vertex_base_type type)
+		{
+			switch (type)
+			{
+			case rsx::vertex_base_type::s32k:
+			case rsx::vertex_base_type::ub256:
+				return true;
+			case rsx::vertex_base_type::f:
+			case rsx::vertex_base_type::cmp:
+			case rsx::vertex_base_type::sf:
+			case rsx::vertex_base_type::s1:
+			case rsx::vertex_base_type::ub:
+				return false;
+			}
+		}
+	}
+
+	std::array<u32, 4> thread::get_color_surface_addresses() const
+	{
+		u32 offset_color[] =
+		{
+			rsx::method_registers[NV4097_SET_SURFACE_COLOR_AOFFSET],
+			rsx::method_registers[NV4097_SET_SURFACE_COLOR_BOFFSET],
+			rsx::method_registers[NV4097_SET_SURFACE_COLOR_COFFSET],
+			rsx::method_registers[NV4097_SET_SURFACE_COLOR_DOFFSET]
+		};
+		u32 context_dma_color[] =
+		{
+			rsx::method_registers[NV4097_SET_CONTEXT_DMA_COLOR_A],
+			rsx::method_registers[NV4097_SET_CONTEXT_DMA_COLOR_B],
+			rsx::method_registers[NV4097_SET_CONTEXT_DMA_COLOR_C],
+			rsx::method_registers[NV4097_SET_CONTEXT_DMA_COLOR_D]
+		};
+		return
+		{
+			rsx::get_address(offset_color[0], context_dma_color[0]),
+			rsx::get_address(offset_color[1], context_dma_color[1]),
+			rsx::get_address(offset_color[2], context_dma_color[2]),
+			rsx::get_address(offset_color[3], context_dma_color[3]),
+		};
+	}
+
+	u32 thread::get_zeta_surface_address() const
+	{
+		u32 m_context_dma_z = rsx::method_registers[NV4097_SET_CONTEXT_DMA_ZETA];
+		u32 offset_zeta = rsx::method_registers[NV4097_SET_SURFACE_ZETA_OFFSET];
+		return rsx::get_address(offset_zeta, m_context_dma_z);
+	}
+
+	RSXVertexProgram thread::get_current_vertex_program() const
+	{
+		RSXVertexProgram result = {};
+		u32 transform_program_start = rsx::method_registers[NV4097_SET_TRANSFORM_PROGRAM_START];
+		result.data.reserve((512 - transform_program_start) * 4);
+
+		for (int i = transform_program_start; i < 512; ++i)
+		{
+			result.data.resize((i - transform_program_start) * 4 + 4);
+			memcpy(result.data.data() + (i - transform_program_start) * 4, transform_program + i * 4, 4 * sizeof(u32));
+
+			D3 d3;
+			d3.HEX = transform_program[i * 4 + 3];
+
+			if (d3.end)
+				break;
+		}
+		result.output_mask = rsx::method_registers[NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK];
+
+		u32 input_mask = rsx::method_registers[NV4097_SET_VERTEX_ATTRIB_INPUT_MASK];
+		u32 modulo_mask = rsx::method_registers[NV4097_SET_FREQUENCY_DIVIDER_OPERATION];
+		result.rsx_vertex_inputs.clear();
+		for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
+		{
+			bool enabled = !!(input_mask & (1 << index));
+			if (!enabled)
+				continue;
+
+			if (vertex_arrays_info[index].size > 0)
+			{
+				result.rsx_vertex_inputs.push_back(
+				{
+					index,
+					vertex_arrays_info[index].size,
+					vertex_arrays_info[index].frequency,
+					!!((modulo_mask >> index) & 0x1),
+					true,
+					is_int_type(vertex_arrays_info[index].type)
+				}
+				);
+			}
+			else if (register_vertex_info[index].size > 0)
+			{
+				result.rsx_vertex_inputs.push_back(
+				{
+					index,
+					register_vertex_info[index].size,
+					register_vertex_info[index].frequency,
+					!!((modulo_mask >> index) & 0x1),
+					false,
+					is_int_type(vertex_arrays_info[index].type)
+				}
+				);
+			}
+		}
+		return result;
+	}
+
+
+	RSXFragmentProgram thread::get_current_fragment_program() const
+	{
+		RSXFragmentProgram result = {};
+		u32 shader_program = rsx::method_registers[NV4097_SET_SHADER_PROGRAM];
+		result.offset = shader_program & ~0x3;
+		result.addr = vm::base(rsx::get_address(result.offset, (shader_program & 0x3) - 1));
+		result.ctrl = rsx::method_registers[NV4097_SET_SHADER_CONTROL];
+		result.unnormalized_coords = 0;
+		result.front_back_color_enabled = !rsx::method_registers[NV4097_SET_TWO_SIDE_LIGHT_EN];
+		result.back_color_diffuse_output = !!(rsx::method_registers[NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK] & CELL_GCM_ATTRIB_OUTPUT_MASK_BACKDIFFUSE);
+		result.back_color_specular_output = !!(rsx::method_registers[NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK] & CELL_GCM_ATTRIB_OUTPUT_MASK_BACKSPECULAR);
+		result.alpha_func = to_comparaison_function(rsx::method_registers[NV4097_SET_ALPHA_FUNC]);
+		result.fog_equation = rsx::to_fog_mode(rsx::method_registers[NV4097_SET_FOG_MODE]);
+		u32 shader_window = rsx::method_registers[NV4097_SET_SHADER_WINDOW];
+		result.origin_mode = rsx::to_window_origin((shader_window >> 12) & 0xF);
+		result.pixel_center_mode = rsx::to_window_pixel_center((shader_window >> 16) & 0xF);
+		result.height = shader_window & 0xFFF;
+
+		std::array<texture_dimension_extended, 16> texture_dimensions;
+		for (u32 i = 0; i < rsx::limits::textures_count; ++i)
+		{
+			if (!textures[i].enabled())
+				texture_dimensions[i] = texture_dimension_extended::texture_dimension_2d;
+			else
+				texture_dimensions[i] = textures[i].get_extended_texture_dimension();
+			if (textures[i].enabled() && (textures[i].format() & CELL_GCM_TEXTURE_UN))
+				result.unnormalized_coords |= (1 << i);
+		}
+		result.set_texture_dimension(texture_dimensions);
+
+		return result;
 	}
 
 	void thread::reset()
@@ -1194,7 +789,10 @@ namespace rsx
 
 		method_registers[NV4097_SET_LINE_WIDTH] = 1 << 3;
 
-		method_registers[NV4097_SET_FOG_MODE] = CELL_GCM_FOG_MODE_EXP;
+		// These defaults were found using After Burner Climax (which never set fog mode despite using fog input)
+		method_registers[NV4097_SET_FOG_MODE] = 0x2601; // rsx::fog_mode::linear;
+		(f32&)method_registers[NV4097_SET_FOG_PARAMS] = 1.;
+		(f32&)method_registers[NV4097_SET_FOG_PARAMS + 1] = 1.;
 
 		method_registers[NV4097_SET_DEPTH_FUNC] = CELL_GCM_LESS;
 		method_registers[NV4097_SET_DEPTH_MASK] = CELL_GCM_TRUE;
@@ -1211,10 +809,25 @@ namespace rsx
 
 		method_registers[NV4097_SET_ZSTENCIL_CLEAR_VALUE] = 0xffffffff;
 
+		method_registers[NV4097_SET_CONTEXT_DMA_REPORT] = CELL_GCM_CONTEXT_DMA_TO_MEMORY_GET_REPORT;
+		rsx::method_registers[NV4097_SET_TWO_SIDE_LIGHT_EN] = true;
+		rsx::method_registers[NV4097_SET_ALPHA_FUNC] = CELL_GCM_ALWAYS;
+
+		// Reset vertex attrib array
+		for (int i = 0; i < limits::vertex_count; i++)
+		{
+			vertex_arrays_info[i].size = 0;
+		}
+
 		// Construct Textures
 		for (int i = 0; i < limits::textures_count; i++)
 		{
 			textures[i].init(i);
+		}
+
+		for (int i = 0; i < limits::vertex_textures_count; i++)
+		{
+			vertex_textures[i].init(i);
 		}
 	}
 
@@ -1228,8 +841,42 @@ namespace rsx
 
 		m_used_gcm_commands.clear();
 
-		on_init();
+		on_init_rsx();
 		start();
+	}
+
+	GcmTileInfo *thread::find_tile(u32 offset, u32 location)
+	{
+		for (GcmTileInfo &tile : tiles)
+		{
+			if (!tile.binded || tile.location != location)
+			{
+				continue;
+			}
+
+			if (offset >= tile.offset && offset < tile.offset + tile.size)
+			{
+				return &tile;
+			}
+		}
+
+		return nullptr;
+	}
+
+	tiled_region thread::get_tiled_address(u32 offset, u32 location)
+	{
+		u32 address = get_address(offset, location);
+
+		GcmTileInfo *tile = find_tile(offset, location);
+		u32 base = 0;
+		
+		if (tile)
+		{
+			base = offset - tile->offset;
+			address = get_address(tile->offset, location);
+		}
+
+		return{ address, base, tile, (u8*)vm::base(address) };
 	}
 
 	u32 thread::ReadIO32(u32 addr)

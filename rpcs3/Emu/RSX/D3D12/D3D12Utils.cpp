@@ -3,63 +3,12 @@
 #ifdef _MSC_VER
 #include "D3D12GSRender.h"
 #include "d3dx12.h"
-#include "Utilities/Log.h"
 #define STRINGIFY(x) #x
 
 extern PFN_D3D12_SERIALIZE_ROOT_SIGNATURE wrapD3D12SerializeRootSignature;
 extern pD3DCompile wrapD3DCompile;
 
- /**
- * returns bytecode and root signature of a Compute Shader converting texture from
- * one format to another
- */
-static
-std::pair<ID3DBlob *, ID3DBlob *> compileF32toU8CS()
-{
-	const char *shaderCode = STRINGIFY(
-		Texture2D<float> InputTexture : register(t0); \n
-		RWTexture2D<float> OutputTexture : register(u0);\n
-
-		[numthreads(8, 8, 1)]\n
-		void main(uint3 Id : SV_DispatchThreadID)\n
-	{ \n
-		OutputTexture[Id.xy] = InputTexture.Load(uint3(Id.xy, 0));\n
-	}
-	);
-
-	ID3DBlob *bytecode;
-	Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-	HRESULT hr = wrapD3DCompile(shaderCode, strlen(shaderCode), "test", nullptr, nullptr, "main", "cs_5_0", 0, 0, &bytecode, errorBlob.GetAddressOf());
-	if (hr != S_OK)
-	{
-		const char *tmp = (const char*)errorBlob->GetBufferPointer();
-		LOG_ERROR(RSX, tmp);
-	}
-	CD3DX12_DESCRIPTOR_RANGE descriptorRange[] =
-	{
-		// Textures
-		CD3DX12_DESCRIPTOR_RANGE(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0),
-		// UAV (same descriptor heap)
-		CD3DX12_DESCRIPTOR_RANGE(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 1),
-	};
-
-	CD3DX12_ROOT_PARAMETER RP;
-	RP.InitAsDescriptorTable(2, &descriptorRange[0]);
-
-	ID3DBlob *rootSignatureBlob;
-
-	hr = wrapD3D12SerializeRootSignature(&CD3DX12_ROOT_SIGNATURE_DESC(1, &RP), D3D_ROOT_SIGNATURE_VERSION_1, &rootSignatureBlob, &errorBlob);
-	if (hr != S_OK)
-	{
-		const char *tmp = (const char*)errorBlob->GetBufferPointer();
-		LOG_ERROR(RSX, tmp);
-	}
-
-	return std::make_pair(bytecode, rootSignatureBlob);
-}
-
-
-void D3D12GSRender::Shader::Init(ID3D12Device *device, ID3D12CommandQueue *gfxcommandqueue)
+void D3D12GSRender::shader::init(ID3D12Device *device, ID3D12CommandQueue *gfx_command_queue)
 {
 	const char *fsCode = STRINGIFY(
 		Texture2D InputTexture : register(t0); \n
@@ -79,12 +28,7 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device, ID3D12CommandQueue *gfxco
 
 	Microsoft::WRL::ComPtr<ID3DBlob> fsBytecode;
 	Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-	HRESULT hr = wrapD3DCompile(fsCode, strlen(fsCode), "test", nullptr, nullptr, "main", "ps_5_0", 0, 0, &fsBytecode, errorBlob.GetAddressOf());
-	if (hr != S_OK)
-	{
-		const char *tmp = (const char*)errorBlob->GetBufferPointer();
-		LOG_ERROR(RSX, tmp);
-	}
+	CHECK_HRESULT(wrapD3DCompile(fsCode, strlen(fsCode), "test", nullptr, nullptr, "main", "ps_5_0", 0, 0, &fsBytecode, errorBlob.GetAddressOf()));
 
 	const char *vsCode = STRINGIFY(
 	struct VertexInput \n
@@ -109,12 +53,7 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device, ID3D12CommandQueue *gfxco
 	);
 
 	Microsoft::WRL::ComPtr<ID3DBlob> vsBytecode;
-	hr = wrapD3DCompile(vsCode, strlen(vsCode), "test", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBytecode, errorBlob.GetAddressOf());
-	if (hr != S_OK)
-	{
-		const char *tmp = (const char*)errorBlob->GetBufferPointer();
-		LOG_ERROR(RSX, tmp);
-	}
+	CHECK_HRESULT(wrapD3DCompile(vsCode, strlen(vsCode), "test", nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBytecode, errorBlob.GetAddressOf()));
 
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 	psoDesc.PS.BytecodeLength = fsBytecode->GetBufferSize();
@@ -164,32 +103,26 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device, ID3D12CommandQueue *gfxco
 
 	Microsoft::WRL::ComPtr<ID3DBlob> rootSignatureBlob;
 
-	hr = wrapD3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSignatureBlob, &errorBlob);
-	if (hr != S_OK)
-	{
-		const char *tmp = (const char*)errorBlob->GetBufferPointer();
-		LOG_ERROR(RSX, tmp);
-	}
+	CHECK_HRESULT(wrapD3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootSignatureBlob, &errorBlob));
+	CHECK_HRESULT(device->CreateRootSignature(0, rootSignatureBlob->GetBufferPointer(), rootSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&root_signature)));
 
-	hr = device->CreateRootSignature(0, rootSignatureBlob->GetBufferPointer(), rootSignatureBlob->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature));
-
-	psoDesc.pRootSignature = m_rootSignature;
+	psoDesc.pRootSignature = root_signature;
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
-	ThrowIfFailed(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_PSO)));
+	CHECK_HRESULT(device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso)));
 
 	D3D12_DESCRIPTOR_HEAP_DESC textureHeapDesc = { D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV , 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE };
-	ThrowIfFailed(
-		device->CreateDescriptorHeap(&textureHeapDesc, IID_PPV_ARGS(&m_textureDescriptorHeap))
+	CHECK_HRESULT(
+		device->CreateDescriptorHeap(&textureHeapDesc, IID_PPV_ARGS(&texture_descriptor_heap))
 		);
 	D3D12_DESCRIPTOR_HEAP_DESC samplerHeapDesc = { D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER , 2, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE };
-	ThrowIfFailed(
-		device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&m_samplerDescriptorHeap))
+	CHECK_HRESULT(
+		device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&sampler_descriptor_heap))
 		);
 
 	ComPtr<ID3D12Fence> fence;
-	ThrowIfFailed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())));
+	CHECK_HRESULT(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf())));
 	HANDLE handle = CreateEventEx(nullptr, FALSE, FALSE, EVENT_ALL_ACCESS);
 	fence->SetEventOnCompletion(1, handle);
 
@@ -201,15 +134,15 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device, ID3D12CommandQueue *gfxco
 	};
 
 	ComPtr<ID3D12CommandAllocator> cmdlistAllocator;
-	ThrowIfFailed(
+	CHECK_HRESULT(
 		device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(cmdlistAllocator.GetAddressOf()))
 			);
 	ComPtr<ID3D12GraphicsCommandList> cmdList;
-	ThrowIfFailed(
+	CHECK_HRESULT(
 		device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdlistAllocator.Get(),nullptr, IID_PPV_ARGS(cmdList.GetAddressOf()))
 			);
 	ComPtr<ID3D12Resource> intermediateBuffer;
-	ThrowIfFailed(device->CreateCommittedResource(
+	CHECK_HRESULT(device->CreateCommittedResource(
 		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
 		D3D12_HEAP_FLAG_NONE,
 		&CD3DX12_RESOURCE_DESC::Buffer(16 * sizeof(float)),
@@ -218,57 +151,27 @@ void D3D12GSRender::Shader::Init(ID3D12Device *device, ID3D12CommandQueue *gfxco
 		IID_PPV_ARGS(intermediateBuffer.GetAddressOf())
 		));
 
-	ThrowIfFailed(
+	CHECK_HRESULT(
 		device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
 			D3D12_HEAP_FLAG_NONE,
 			&CD3DX12_RESOURCE_DESC::Buffer(16 * sizeof(float)),
 			D3D12_RESOURCE_STATE_COPY_DEST,
 			nullptr,
-			IID_PPV_ARGS(&m_vertexBuffer)
+			IID_PPV_ARGS(&vertex_buffer)
 			));
 
 	D3D12_SUBRESOURCE_DATA vertexData = { reinterpret_cast<BYTE*>(quadVertex), 16 * sizeof(float), 1 };
 
-	UpdateSubresources(cmdList.Get(), m_vertexBuffer, intermediateBuffer.Get(), 0, 0, 1, &vertexData);
-	cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_vertexBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER));
-	ThrowIfFailed(cmdList->Close());
+	UpdateSubresources(cmdList.Get(), vertex_buffer, intermediateBuffer.Get(), 0, 0, 1, &vertexData);
+	cmdList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(vertex_buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER));
+	CHECK_HRESULT(cmdList->Close());
 
-	gfxcommandqueue->ExecuteCommandLists(1, CommandListCast(cmdList.GetAddressOf()));
+	gfx_command_queue->ExecuteCommandLists(1, CommandListCast(cmdList.GetAddressOf()));
 
 	// Now wait until upload has completed
-	gfxcommandqueue->Signal(fence.Get(), 1);
+	gfx_command_queue->Signal(fence.Get(), 1);
 	WaitForSingleObjectEx(handle, INFINITE, FALSE);
 	CloseHandle(handle);
 }
-
-void D3D12GSRender::initConvertShader()
-{
-	const auto &p = compileF32toU8CS();
-	ThrowIfFailed(
-		m_device->CreateRootSignature(0, p.second->GetBufferPointer(), p.second->GetBufferSize(), IID_PPV_ARGS(&m_convertRootSignature))
-		);
-
-	D3D12_COMPUTE_PIPELINE_STATE_DESC computePipelineStateDesc = {};
-	computePipelineStateDesc.CS.BytecodeLength = p.first->GetBufferSize();
-	computePipelineStateDesc.CS.pShaderBytecode = p.first->GetBufferPointer();
-	computePipelineStateDesc.pRootSignature = m_convertRootSignature;
-
-	ThrowIfFailed(
-		m_device->CreateComputePipelineState(&computePipelineStateDesc, IID_PPV_ARGS(&m_convertPSO))
-		);
-
-	p.first->Release();
-	p.second->Release();
-}
-
-
-void unreachable_internal()
-{
-	abort();
-	#ifdef LLVM_BUILTIN_UNREACHABLE
-		LLVM_BUILTIN_UNREACHABLE;
-	#endif
-}
-
 #endif

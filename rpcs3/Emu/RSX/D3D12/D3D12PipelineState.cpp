@@ -1,12 +1,15 @@
 #include "stdafx.h"
 #include "stdafx_d3d12.h"
 #ifdef _MSC_VER
+#include "Utilities/Config.h"
 #include "D3D12PipelineState.h"
 #include "D3D12GSRender.h"
-#include "Emu/state.h"
 #include "D3D12Formats.h"
+#include "../rsx_methods.h"
 
 #define TO_STRING(x) #x
+
+extern cfg::bool_entry g_cfg_rsx_debug_output;
 
 extern pD3DCompile wrapD3DCompile;
 
@@ -16,7 +19,7 @@ void Shader::Compile(const std::string &code, SHADER_TYPE st)
 	HRESULT hr;
 	ComPtr<ID3DBlob> errorBlob;
 	UINT compileFlags;
-	if (rpcs3::config.rsx.d3d12.debug_output.value())
+	if (g_cfg_rsx_debug_output)
 		compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 	else
 		compileFlags = 0;
@@ -35,38 +38,10 @@ void Shader::Compile(const std::string &code, SHADER_TYPE st)
 	}
 }
 
-bool D3D12GSRender::load_program()
+void D3D12GSRender::load_program()
 {
-	u32 transform_program_start = rsx::method_registers[NV4097_SET_TRANSFORM_PROGRAM_START];
-	vertex_program.data.reserve((512 - transform_program_start) * 4);
-
-	for (int i = transform_program_start; i < 512; ++i)
-	{
-		vertex_program.data.resize((i - transform_program_start) * 4 + 4);
-		memcpy(vertex_program.data.data() + (i - transform_program_start) * 4, transform_program + i * 4, 4 * sizeof(u32));
-
-		D3 d3;
-		d3.HEX = transform_program[i * 4 + 3];
-
-		if (d3.end)
-			break;
-	}
-
-	u32 shader_program = rsx::method_registers[NV4097_SET_SHADER_PROGRAM];
-	fragment_program.offset = shader_program & ~0x3;
-	fragment_program.addr = rsx::get_address(fragment_program.offset, (shader_program & 0x3) - 1);
-	fragment_program.ctrl = rsx::method_registers[NV4097_SET_SHADER_CONTROL];
-	fragment_program.texture_dimensions.clear();
-
-	for (u32 i = 0; i < rsx::limits::textures_count; ++i)
-	{
-		if (!textures[i].enabled())
-			fragment_program.texture_dimensions.push_back(texture_dimension::texture_dimension_2d);
-		else if (textures[i].cubemap())
-			fragment_program.texture_dimensions.push_back(texture_dimension::texture_dimension_cubemap);
-		else
-			fragment_program.texture_dimensions.push_back(texture_dimension::texture_dimension_2d);
-	}
+	m_vertex_program = get_current_vertex_program();
+	m_fragment_program = get_current_fragment_program();
 
 	D3D12PipelineProperties prop = {};
 	prop.Topology = get_primitive_topology_type(draw_mode);
@@ -161,19 +136,19 @@ bool D3D12GSRender::load_program()
 	prop.DepthStencilFormat = get_depth_stencil_surface_format(m_surface.depth_format);
 	prop.RenderTargetsFormat = get_color_surface_format(m_surface.color_format);
 
-	switch (u32 color_target = rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET])
+	switch (rsx::to_surface_target(rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET]))
 	{
-	case CELL_GCM_SURFACE_TARGET_0:
-	case CELL_GCM_SURFACE_TARGET_1:
+	case rsx::surface_target::surface_a:
+	case rsx::surface_target::surface_b:
 		prop.numMRT = 1;
 		break;
-	case CELL_GCM_SURFACE_TARGET_MRT1:
+	case rsx::surface_target::surfaces_a_b:
 		prop.numMRT = 2;
 		break;
-	case CELL_GCM_SURFACE_TARGET_MRT2:
+	case rsx::surface_target::surfaces_a_b_c:
 		prop.numMRT = 3;
 		break;
-	case CELL_GCM_SURFACE_TARGET_MRT3:
+	case rsx::surface_target::surfaces_a_b_c_d:
 		prop.numMRT = 4;
 		break;
 	default:
@@ -222,7 +197,7 @@ bool D3D12GSRender::load_program()
 		D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF,
 	};
 	prop.Rasterization = CD3D12_RASTERIZER_DESC;
-	if (rsx::method_registers[NV4097_SET_CULL_FACE_ENABLE])
+	if (!!rsx::method_registers[NV4097_SET_CULL_FACE_ENABLE])
 	{
 		switch (rsx::method_registers[NV4097_SET_CULL_FACE])
 		{
@@ -250,17 +225,25 @@ bool D3D12GSRender::load_program()
 	for (unsigned i = 0; i < prop.numMRT; i++)
 		prop.Blend.RenderTarget[i].RenderTargetWriteMask = mask;
 
-	prop.IASet = m_IASet;
 	if (!!rsx::method_registers[NV4097_SET_RESTART_INDEX_ENABLE])
-		prop.CutValue = ((rsx::method_registers[NV4097_SET_INDEX_ARRAY_DMA] >> 4) == CELL_GCM_DRAW_INDEX_ARRAY_TYPE_32) ?
-			D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+	{
+		rsx::index_array_type index_type = rsx::to_index_array_type(rsx::method_registers[NV4097_SET_INDEX_ARRAY_DMA] >> 4);
+		if (index_type == rsx::index_array_type::u32)
+		{
+			prop.CutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+		}
+		if (index_type == rsx::index_array_type::u16)
+		{
+			prop.CutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+		}
+	}
 
-	m_current_pso = m_pso_cache.getGraphicPipelineState(&vertex_program, &fragment_program, prop, std::make_pair(m_device.Get(), m_root_signatures));
-	return m_current_pso != nullptr;
+	m_current_pso = m_pso_cache.getGraphicPipelineState(m_vertex_program, m_fragment_program, prop, m_device.Get(), m_shared_root_signature.Get());
+	return;
 }
 
 std::pair<std::string, std::string> D3D12GSRender::get_programs() const
 {
-	return std::make_pair(m_pso_cache.get_transform_program(vertex_program)->content, m_pso_cache.get_shader_program(fragment_program)->content);
+	return std::make_pair(m_pso_cache.get_transform_program(m_vertex_program).content, m_pso_cache.get_shader_program(m_fragment_program).content);
 }
 #endif

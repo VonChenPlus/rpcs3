@@ -1,151 +1,88 @@
 #pragma once
 #include "D3D12Utils.h"
 #include "d3dx12.h"
+#include "../Common/ring_buffer_helper.h"
+#include <list>
 
-
-template<typename T>
-struct init_heap
+struct d3d12_data_heap : public data_heap
 {
-	static T* init(ID3D12Device *device, size_t heapSize, D3D12_HEAP_TYPE type, D3D12_HEAP_FLAGS flags);
-};
+	ComPtr<ID3D12Resource> m_heap;
+public:
+	d3d12_data_heap() = default;
+	~d3d12_data_heap() = default;
+	d3d12_data_heap(const d3d12_data_heap&) = delete;
+	d3d12_data_heap(d3d12_data_heap&&) = delete;
 
-template<>
-struct init_heap<ID3D12Heap>
-{
-	static ID3D12Heap* init(ID3D12Device *device, size_t heap_size, D3D12_HEAP_TYPE type, D3D12_HEAP_FLAGS flags)
+	template <typename... arg_type>
+	void init(ID3D12Device *device, size_t heap_size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state)
 	{
-		ID3D12Heap *result;
-		D3D12_HEAP_DESC heap_desc = {};
-		heap_desc.SizeInBytes = heap_size;
-		heap_desc.Properties.Type = type;
-		heap_desc.Flags = flags;
-		ThrowIfFailed(device->CreateHeap(&heap_desc, IID_PPV_ARGS(&result)));
-		return result;
-	}
-};
+		m_size = heap_size;
+		m_put_pos = 0;
+		m_get_pos = heap_size - 1;
 
-template<>
-struct init_heap<ID3D12Resource>
-{
-	static ID3D12Resource* init(ID3D12Device *device, size_t heap_size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state)
-	{
-		ID3D12Resource *result;
 		D3D12_HEAP_PROPERTIES heap_properties = {};
 		heap_properties.Type = type;
-		ThrowIfFailed(device->CreateCommittedResource(&heap_properties,
+		CHECK_HRESULT(device->CreateCommittedResource(&heap_properties,
 			D3D12_HEAP_FLAG_NONE,
 			&CD3DX12_RESOURCE_DESC::Buffer(heap_size),
 			state,
 			nullptr,
-			IID_PPV_ARGS(&result))
+			IID_PPV_ARGS(m_heap.GetAddressOf()))
 			);
-
-		return result;
-	}
-};
-
-
-/**
-* Wrapper around a ID3D12Resource or a ID3D12Heap.
-* Acts as a ring buffer : hold a get and put pointers,
-* put pointer is used as storage space offset
-* and get is used as beginning of in use data space.
-* This wrapper checks that put pointer doesn't cross get one.
-*/
-template<typename T, size_t alignment>
-struct data_heap
-{
-	T *m_heap;
-	size_t m_size;
-	size_t m_put_pos; // Start of free space
-	size_t m_get_pos; // End of free space
-
-	template <typename... arg_type>
-	void init(ID3D12Device *device, size_t heap_size, D3D12_HEAP_TYPE type, arg_type... args)
-	{
-		m_size = heap_size;
-		m_heap = init_heap<T>::init(device, heap_size, type, args...);
-		m_put_pos = 0;
-		m_get_pos = heap_size - 1;
 	}
 
-	/**
-	* Does alloc cross get position ?
-	*/
-	bool can_alloc(size_t size) const noexcept
+	template<typename T>
+	T* map(const D3D12_RANGE &range)
 	{
-		size_t alloc_size = align(size, alignment);
-		if (m_put_pos + alloc_size < m_size)
-		{
-			// range before get
-			if (m_put_pos + alloc_size < m_get_pos)
-				return true;
-			// range after get
-			if (m_put_pos > m_get_pos)
-				return true;
-			return false;
-		}
-		else
-		{
-			// ..]....[..get..
-			if (m_put_pos < m_get_pos)
-				return false;
-			// ..get..]...[...
-			// Actually all resources extending beyond heap space starts at 0
-			if (alloc_size > m_get_pos)
-				return false;
-			return true;
-		}
+		void *buffer;
+		CHECK_HRESULT(m_heap->Map(0, &range, &buffer));
+		void *mapped_buffer = (char*)buffer + range.Begin;
+		return static_cast<T*>(mapped_buffer);
 	}
 
-	size_t alloc(size_t size) noexcept
+	template<typename T>
+	T* map(size_t heap_offset)
 	{
-		assert(can_alloc(size));
-		size_t alloc_size = align(size, alignment);
-		if (m_put_pos + alloc_size < m_size)
-		{
-			size_t old_put_pos = m_put_pos;
-			m_put_pos += alloc_size;
-			return old_put_pos;
-		}
-		else
-		{
-			m_put_pos = alloc_size;
-			return 0;
-		}
+		void *buffer;
+		CHECK_HRESULT(m_heap->Map(0, nullptr, &buffer));
+		void *mapped_buffer = (char*)buffer + heap_offset;
+		return static_cast<T*>(mapped_buffer);
 	}
 
-	void release() noexcept
+	void unmap(const D3D12_RANGE &range)
 	{
-		m_heap->Release();
+		m_heap->Unmap(0, &range);
 	}
 
-	/**
-	* return current putpos - 1
-	*/
-	size_t get_current_put_pos_minus_one() const noexcept
+	void unmap()
 	{
-		return (m_put_pos - 1 > 0) ? m_put_pos - 1 : m_size - 1;
+		m_heap->Unmap(0, nullptr);
+	}
+
+	ID3D12Resource* get_heap()
+	{
+		return m_heap.Get();
 	}
 };
 
 struct texture_entry
 {
-	int m_format;
+	u8 m_format;
+	bool m_is_dirty;
 	size_t m_width;
 	size_t m_height;
 	size_t m_mipmap;
-	bool m_is_dirty;
+	size_t m_depth;
 
-	texture_entry() : m_format(0), m_width(0), m_height(0), m_is_dirty(true)
+	texture_entry() : m_format(0), m_width(0), m_height(0), m_depth(0), m_is_dirty(true)
 	{}
 
-	texture_entry(int f, size_t w, size_t h, size_t m) : m_format(f), m_width(w), m_height(h), m_is_dirty(false)
+	texture_entry(u8 f, size_t w, size_t h, size_t d, size_t m) : m_format(f), m_width(w), m_height(h), m_depth(d), m_is_dirty(false), m_mipmap(m)
 	{}
 
 	bool operator==(const texture_entry &other)
 	{
-		return (m_format == other.m_format && m_width == other.m_width && m_height == other.m_height);
+		return (m_format == other.m_format && m_width == other.m_width && m_height == other.m_height && m_mipmap == other.m_mipmap && m_depth == other.m_depth);
 	}
 };
 
@@ -165,28 +102,33 @@ private:
 	std::unordered_map<u64, std::pair<texture_entry, ComPtr<ID3D12Resource>> > m_address_to_data; // Storage
 	std::list <std::tuple<u64, u32, u32> > m_protected_ranges; // address, start of protected range, size of protected range
 public:
-	void store_and_protect_data(u64 key, u32 start, size_t size, int format, size_t w, size_t h, size_t m, ComPtr<ID3D12Resource> data) noexcept;
+	data_cache() = default;
+	~data_cache() = default;
+	data_cache(const data_cache&) = delete;
+	data_cache(data_cache&&) = delete;
+
+	void store_and_protect_data(u64 key, u32 start, size_t size, u8 format, size_t w, size_t h, size_t d, size_t m, ComPtr<ID3D12Resource> data);
 
 	/**
 	* Make memory from start to start + size write protected.
 	* Associate key to this range so that when a write is detected, data at key is marked dirty.
 	*/
-	void protect_data(u64 key, u32 start, size_t size) noexcept;
+	void protect_data(u64 key, u32 start, size_t size);
 
 	/**
 	 * Remove all data containing addr from cache, unprotect them. Returns false if no data is modified.
 	 */
-	bool invalidate_address(u32 addr) noexcept;
+	bool invalidate_address(u32 addr);
 
-	std::pair<texture_entry, ComPtr<ID3D12Resource> > *find_data_if_available(u64 key) noexcept;
+	std::pair<texture_entry, ComPtr<ID3D12Resource> > *find_data_if_available(u64 key);
 
-	void unprotect_all() noexcept;
+	void unprotect_all();
 
 	/**
 	* Remove data stored at key, and returns a ComPtr owning it.
 	* The caller is responsible for releasing the ComPtr.
 	*/
-	ComPtr<ID3D12Resource> remove_from_cache(u64 key) noexcept;
+	ComPtr<ID3D12Resource> remove_from_cache(u64 key);
 };
 
 /**
@@ -196,6 +138,11 @@ public:
 */
 struct resource_storage
 {
+	resource_storage() = default;
+	~resource_storage() = default;
+	resource_storage(const resource_storage&) = delete;
+	resource_storage(resource_storage&&) = delete;
+
 	bool in_use; // False until command list has been populated at least once
 	ComPtr<ID3D12Fence> frame_finished_fence;
 	UINT64 fence_value;
@@ -230,11 +177,8 @@ struct resource_storage
 	 * This means newer resources shouldn't allocate memory crossing this position
 	 * until the frame rendering is over.
 	 */
-	size_t constants_heap_get_pos;
-	size_t vertex_index_heap_get_pos;
-	size_t texture_upload_heap_get_pos;
+	size_t buffer_heap_get_pos;
 	size_t readback_heap_get_pos;
-	size_t uav_heap_get_pos;
 
 	void reset();
 	void init(ID3D12Device *device);

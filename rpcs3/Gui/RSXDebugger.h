@@ -1,7 +1,5 @@
 #pragma once
 
-#include <wx/listctrl.h>
-
 class RSXDebugger : public wxDialog
 {
 	u32 m_addr;
@@ -21,6 +19,7 @@ class RSXDebugger : public wxDialog
 	wxListView* m_list_lightning;
 	wxListView* m_list_texture;
 	wxListView* m_list_settings;
+	wxListView* m_list_index_buffer;
 
 	wxPanel* p_buffer_colorA;
 	wxPanel* p_buffer_colorB;
@@ -31,6 +30,8 @@ class RSXDebugger : public wxDialog
 	wxPanel* p_buffer_tex;
 
 	wxImage buffer_img[4];
+	wxImage depth_img;
+	wxImage stencil_img;
 
 	wxTextCtrl* m_text_transform_program;
 	wxTextCtrl *m_text_shader_program;
@@ -69,7 +70,5 @@ public:
 	const char* ParseGCMEnum(u32 value, u32 type);
 	wxString DisAsmCommand(u32 cmd, u32 count, u32 currentAddr, u32 ioAddr);
 	
-
-	bool RSXReady();
 	void SetPC(const uint pc) { m_addr = pc; }
 };

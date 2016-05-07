@@ -2,6 +2,7 @@
 #include "Emu/Memory/Memory.h"
 #include "RSXThread.h"
 #include "RSXTexture.h"
+#include "rsx_methods.h"
 
 namespace rsx
 {
@@ -59,9 +60,19 @@ namespace rsx
 		return ((method_registers[NV4097_SET_TEXTURE_FORMAT + (m_index * 8)] >> 3) & 0x1);
 	}
 
-	u8 texture::dimension() const
+	rsx::texture_dimension texture::dimension() const
 	{
-		return ((method_registers[NV4097_SET_TEXTURE_FORMAT + (m_index * 8)] >> 4) & 0xf);
+		return rsx::to_texture_dimension((method_registers[NV4097_SET_TEXTURE_FORMAT + (m_index * 8)] >> 4) & 0xf);
+	}
+
+	rsx::texture_dimension_extended texture::get_extended_texture_dimension() const
+	{
+		switch (dimension())
+		{
+		case rsx::texture_dimension::dimension1d: return rsx::texture_dimension_extended::texture_dimension_1d;
+		case rsx::texture_dimension::dimension3d: return rsx::texture_dimension_extended::texture_dimension_2d;
+		case rsx::texture_dimension::dimension2d: return cubemap() ? rsx::texture_dimension_extended::texture_dimension_cubemap : rsx::texture_dimension_extended::texture_dimension_2d;
+		}
 	}
 
 	u8 texture::format() const
@@ -69,24 +80,47 @@ namespace rsx
 		return ((method_registers[NV4097_SET_TEXTURE_FORMAT + (m_index * 8)] >> 8) & 0xff);
 	}
 
+	bool texture::is_compressed_format() const
+	{
+		int texture_format = format() & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
+		if (texture_format == CELL_GCM_TEXTURE_COMPRESSED_DXT1 ||
+			texture_format == CELL_GCM_TEXTURE_COMPRESSED_DXT23 ||
+			texture_format == CELL_GCM_TEXTURE_COMPRESSED_DXT45)
+			return true;
+		return false;
+	}
+
 	u16 texture::mipmap() const
 	{
 		return ((method_registers[NV4097_SET_TEXTURE_FORMAT + (m_index * 8)] >> 16) & 0xffff);
 	}
 
-	u8 texture::wrap_s() const
+	u16 texture::get_exact_mipmap_count() const
 	{
-		return ((method_registers[NV4097_SET_TEXTURE_ADDRESS + (m_index * 8)]) & 0xf);
+		if (is_compressed_format())
+		{
+			// OpenGL considers that highest mipmap level for DXTC format is when either width or height is 1
+			// not both. Assume it's the same for others backend.
+			u16 max_mipmap_count = static_cast<u16>(floor(log2(std::min(width() / 4, height() / 4))) + 1);
+			return std::min(mipmap(), max_mipmap_count);
+		}
+		u16 max_mipmap_count = static_cast<u16>(floor(log2(std::max(width(), height()))) + 1);
+		return std::min(mipmap(), max_mipmap_count);
 	}
 
-	u8 texture::wrap_t() const
+	rsx::texture_wrap_mode texture::wrap_s() const
 	{
-		return ((method_registers[NV4097_SET_TEXTURE_ADDRESS + (m_index * 8)] >> 8) & 0xf);
+		return rsx::to_texture_wrap_mode((method_registers[NV4097_SET_TEXTURE_ADDRESS + (m_index * 8)]) & 0xf);
 	}
 
-	u8 texture::wrap_r() const
+	rsx::texture_wrap_mode texture::wrap_t() const
 	{
-		return ((method_registers[NV4097_SET_TEXTURE_ADDRESS + (m_index * 8)] >> 16) & 0xf);
+		return rsx::to_texture_wrap_mode((method_registers[NV4097_SET_TEXTURE_ADDRESS + (m_index * 8)] >> 8) & 0xf);
+	}
+
+	rsx::texture_wrap_mode texture::wrap_r() const
+	{
+		return rsx::to_texture_wrap_mode((method_registers[NV4097_SET_TEXTURE_ADDRESS + (m_index * 8)] >> 16) & 0xf);
 	}
 
 	u8 texture::unsigned_remap() const
@@ -129,9 +163,9 @@ namespace rsx
 		return ((method_registers[NV4097_SET_TEXTURE_CONTROL0 + (m_index * 8)] >> 7) & 0xfff);
 	}
 
-	u8   texture::max_aniso() const
+	rsx::texture_max_anisotropy   texture::max_aniso() const
 	{
-		return ((method_registers[NV4097_SET_TEXTURE_CONTROL0 + (m_index * 8)] >> 4) & 0x7);
+		return rsx::to_texture_max_anisotropy((method_registers[NV4097_SET_TEXTURE_CONTROL0 + (m_index * 8)] >> 4) & 0x7);
 	}
 
 	bool texture::alpha_kill_enabled() const
@@ -149,14 +183,14 @@ namespace rsx
 		return float(f16((method_registers[NV4097_SET_TEXTURE_FILTER + (m_index * 8)]) & 0x1fff));
 	}
 
-	u8  texture::min_filter() const
+	rsx::texture_minify_filter texture::min_filter() const
 	{
-		return ((method_registers[NV4097_SET_TEXTURE_FILTER + (m_index * 8)] >> 16) & 0x7);
+		return rsx::to_texture_minify_filter((method_registers[NV4097_SET_TEXTURE_FILTER + (m_index * 8)] >> 16) & 0x7);
 	}
 
-	u8  texture::mag_filter() const
+	rsx::texture_magnify_filter texture::mag_filter() const
 	{
-		return ((method_registers[NV4097_SET_TEXTURE_FILTER + (m_index * 8)] >> 24) & 0x7);
+		return rsx::to_texture_magnify_filter((method_registers[NV4097_SET_TEXTURE_FILTER + (m_index * 8)] >> 24) & 0x7);
 	}
 
 	u8 texture::convolution_filter() const
@@ -201,12 +235,12 @@ namespace rsx
 
 	u16 texture::depth() const
 	{
-		return method_registers[NV4097_SET_TEXTURE_CONTROL3] >> 20;
+		return method_registers[NV4097_SET_TEXTURE_CONTROL3 + m_index] >> 20;
 	}
 
 	u32 texture::pitch() const
 	{
-		return method_registers[NV4097_SET_TEXTURE_CONTROL3] & 0xfffff;
+		return method_registers[NV4097_SET_TEXTURE_CONTROL3 + m_index] & 0xfffff;
 	}
 
 	void vertex_texture::init(u8 index)
@@ -278,24 +312,6 @@ namespace rsx
 		return ((method_registers[NV4097_SET_VERTEX_TEXTURE_FORMAT + (m_index * 8)] >> 16) & 0xffff);
 	}
 
-	u8 vertex_texture::wrap_s() const
-	{
-		return 1;
-		//return ((method_registers[NV4097_SET_VERTEX_TEXTURE_ADDRESS + (m_index * 8)]) & 0xf);
-	}
-
-	u8 vertex_texture::wrap_t() const
-	{
-		return 1;
-		//return ((method_registers[NV4097_SET_VERTEX_TEXTURE_ADDRESS + (m_index * 8)] >> 8) & 0xf);
-	}
-
-	u8 vertex_texture::wrap_r() const
-	{
-		return 1;
-		//return ((method_registers[NV4097_SET_VERTEX_TEXTURE_ADDRESS + (m_index * 8)] >> 16) & 0xf);
-	}
-
 	u8 vertex_texture::unsigned_remap() const
 	{
 		return ((method_registers[NV4097_SET_VERTEX_TEXTURE_ADDRESS + (m_index * 8)] >> 12) & 0xf);
@@ -344,11 +360,6 @@ namespace rsx
 	bool vertex_texture::alpha_kill_enabled() const
 	{
 		return ((method_registers[NV4097_SET_VERTEX_TEXTURE_CONTROL0 + (m_index * 8)] >> 2) & 0x1);
-	}
-
-	u32 vertex_texture::remap() const
-	{
-		return 0 | (1 << 2) | (2 << 4) | (3 << 6);//(method_registers[NV4097_SET_VERTEX_TEXTURE_CONTROL1 + (m_index * 8)]);
 	}
 
 	u16 vertex_texture::bias() const
@@ -408,11 +419,11 @@ namespace rsx
 
 	u16 vertex_texture::depth() const
 	{
-		return method_registers[NV4097_SET_VERTEX_TEXTURE_CONTROL3] >> 20;
+		return method_registers[NV4097_SET_VERTEX_TEXTURE_CONTROL3 + (m_index * 8)] >> 20;
 	}
 
 	u32 vertex_texture::pitch() const
 	{
-		return method_registers[NV4097_SET_VERTEX_TEXTURE_CONTROL3] & 0xfffff;
+		return method_registers[NV4097_SET_VERTEX_TEXTURE_CONTROL3 + (m_index * 8)] & 0xfffff;
 	}
 }

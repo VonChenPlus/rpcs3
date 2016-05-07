@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Log.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 
@@ -8,20 +7,27 @@
 
 #include <fenv.h>
 
-namespace spu_interpreter
+// Compare 16 packed unsigned bytes (greater than)
+inline __m128i sse_cmpgt_epu8(__m128i A, __m128i B)
 {
-	namespace fast
-	{
-		const spu_opcode_table_t<spu_inter_func_t> g_spu_opcode_table{ DEFINE_SPU_OPCODES(+), default_function };
-	}
-
-	namespace precise
-	{
-		const spu_opcode_table_t<spu_inter_func_t> g_spu_opcode_table{ DEFINE_SPU_OPCODES(+), default_function };
-	}
+	// (A xor 0x80) > (B xor 0x80)
+	const auto sign = _mm_set1_epi32(0x80808080);
+	return _mm_cmpgt_epi8(_mm_xor_si128(A, sign), _mm_xor_si128(B, sign));
 }
 
-void spu_interpreter::default_function(SPUThread& spu, spu_opcode_t op)
+inline __m128i sse_cmpgt_epu16(__m128i A, __m128i B)
+{
+	const auto sign = _mm_set1_epi32(0x80008000);
+	return _mm_cmpgt_epi16(_mm_xor_si128(A, sign), _mm_xor_si128(B, sign));
+}
+
+inline __m128i sse_cmpgt_epu32(__m128i A, __m128i B)
+{
+	const auto sign = _mm_set1_epi32(0x80000000);
+	return _mm_cmpgt_epi32(_mm_xor_si128(A, sign), _mm_xor_si128(B, sign));
+}
+
+void spu_interpreter::UNK(SPUThread& spu, spu_opcode_t op)
 {
 	throw EXCEPTION("Unknown/Illegal instruction (0x%08x)", op.opcode);
 }
@@ -47,7 +53,10 @@ void spu_interpreter::set_interrupt_status(SPUThread& spu, spu_opcode_t op)
 
 void spu_interpreter::STOP(SPUThread& spu, spu_opcode_t op)
 {
-	spu.stop_and_signal(op.opcode & 0x3fff);
+	if (!spu.stop_and_signal(op.opcode & 0x3fff))
+	{
+		spu.pc -= 4;
+	}
 }
 
 void spu_interpreter::LNOP(SPUThread& spu, spu_opcode_t op)
@@ -73,7 +82,10 @@ void spu_interpreter::MFSPR(SPUThread& spu, spu_opcode_t op)
 
 void spu_interpreter::RDCH(SPUThread& spu, spu_opcode_t op)
 {
-	spu.gpr[op.rt] = v128::from32r(spu.get_ch_value(op.ra));
+	if (!spu.get_ch_value(op.ra, spu.gpr[op.rt]._u32[3]))
+	{
+		spu.pc -= 4;
+	}
 }
 
 void spu_interpreter::RCHCNT(SPUThread& spu, spu_opcode_t op)
@@ -290,7 +302,10 @@ void spu_interpreter::MTSPR(SPUThread& spu, spu_opcode_t op)
 
 void spu_interpreter::WRCH(SPUThread& spu, spu_opcode_t op)
 {
-	spu.set_ch_value(op.ra, spu.gpr[op.rt]._u32[3]);
+	if (!spu.set_ch_value(op.ra, spu.gpr[op.rt]._u32[3]))
+	{
+		spu.pc -= 4;
+	}
 }
 
 void spu_interpreter::BIZ(SPUThread& spu, spu_opcode_t op)
@@ -397,12 +412,12 @@ void spu_interpreter::FSMB(SPUThread& spu, spu_opcode_t op)
 	spu.gpr[op.rt] = g_spu_imm.fsmb[spu.gpr[op.ra]._u32[3] & 0xffff];
 }
 
-void spu_interpreter::fast::FREST(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FREST(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vf = _mm_rcp_ps(spu.gpr[op.ra].vf);
 }
 
-void spu_interpreter::fast::FRSQEST(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FRSQEST(SPUThread& spu, spu_opcode_t op)
 {
 	const auto mask = _mm_castsi128_ps(_mm_set1_epi32(0x7fffffff));
 	spu.gpr[op.rt].vf = _mm_rsqrt_ps(_mm_and_ps(spu.gpr[op.ra].vf, mask));
@@ -688,7 +703,7 @@ void spu_interpreter::ANDC(SPUThread& spu, spu_opcode_t op)
 	spu.gpr[op.rt] = v128::andnot(spu.gpr[op.rb], spu.gpr[op.ra]);
 }
 
-void spu_interpreter::fast::FCGT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FCGT(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vf = _mm_cmplt_ps(spu.gpr[op.rb].vf, spu.gpr[op.ra].vf);
 }
@@ -698,17 +713,17 @@ void spu_interpreter::DFCGT(SPUThread& spu, spu_opcode_t op)
 	throw EXCEPTION("Unexpected instruction");
 }
 
-void spu_interpreter::fast::FA(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FA(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt] = v128::addfs(spu.gpr[op.ra], spu.gpr[op.rb]);
 }
 
-void spu_interpreter::fast::FS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FS(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt] = v128::subfs(spu.gpr[op.ra], spu.gpr[op.rb]);
 }
 
-void spu_interpreter::fast::FM(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FM(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vf = _mm_mul_ps(spu.gpr[op.ra].vf, spu.gpr[op.rb].vf);
 }
@@ -723,7 +738,7 @@ void spu_interpreter::ORC(SPUThread& spu, spu_opcode_t op)
 	spu.gpr[op.rt] = spu.gpr[op.ra] | ~spu.gpr[op.rb];
 }
 
-void spu_interpreter::fast::FCMGT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FCMGT(SPUThread& spu, spu_opcode_t op)
 {
 	const auto mask = _mm_castsi128_ps(_mm_set1_epi32(0x7fffffff));
 	spu.gpr[op.rt].vf = _mm_cmplt_ps(_mm_and_ps(spu.gpr[op.rb].vf, mask), _mm_and_ps(spu.gpr[op.ra].vf, mask));
@@ -734,17 +749,17 @@ void spu_interpreter::DFCMGT(SPUThread& spu, spu_opcode_t op)
 	throw EXCEPTION("Unexpected instruction");
 }
 
-void spu_interpreter::fast::DFA(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::DFA(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt] = v128::addfd(spu.gpr[op.ra], spu.gpr[op.rb]);
 }
 
-void spu_interpreter::fast::DFS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::DFS(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt] = v128::subfd(spu.gpr[op.ra], spu.gpr[op.rb]);
 }
 
-void spu_interpreter::fast::DFM(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::DFM(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vd = _mm_mul_pd(spu.gpr[op.ra].vd, spu.gpr[op.rb].vd);
 }
@@ -762,22 +777,22 @@ void spu_interpreter::HLGT(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::fast::DFMA(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::DFMA(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vd = _mm_add_pd(_mm_mul_pd(spu.gpr[op.ra].vd, spu.gpr[op.rb].vd), spu.gpr[op.rt].vd);
 }
 
-void spu_interpreter::fast::DFMS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::DFMS(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vd = _mm_sub_pd(_mm_mul_pd(spu.gpr[op.ra].vd, spu.gpr[op.rb].vd), spu.gpr[op.rt].vd);
 }
 
-void spu_interpreter::fast::DFNMS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::DFNMS(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vd = _mm_sub_pd(spu.gpr[op.rt].vd, _mm_mul_pd(spu.gpr[op.ra].vd, spu.gpr[op.rb].vd));
 }
 
-void spu_interpreter::fast::DFNMA(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::DFNMA(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vd = _mm_sub_pd(_mm_set1_pd(0.0), _mm_add_pd(_mm_mul_pd(spu.gpr[op.ra].vd, spu.gpr[op.rb].vd), spu.gpr[op.rt].vd));
 }
@@ -834,24 +849,24 @@ void spu_interpreter::MPYHHAU(SPUThread& spu, spu_opcode_t op)
 	spu.gpr[op.rt].vi = _mm_add_epi32(spu.gpr[op.rt].vi, _mm_or_si128(_mm_srli_epi32(_mm_mullo_epi16(a, b), 16), _mm_and_si128(_mm_mulhi_epu16(a, b), _mm_set1_epi32(0xffff0000))));
 }
 
-void spu_interpreter::fast::FSCRRD(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FSCRRD(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].clear();
 }
 
-void spu_interpreter::fast::FESD(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FESD(SPUThread& spu, spu_opcode_t op)
 {
 	const auto a = spu.gpr[op.ra].vf;
 	spu.gpr[op.rt].vd = _mm_cvtps_pd(_mm_shuffle_ps(a, a, 0x8d));
 }
 
-void spu_interpreter::fast::FRDS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FRDS(SPUThread& spu, spu_opcode_t op)
 {
 	const auto t = _mm_cvtpd_ps(spu.gpr[op.ra].vd);
 	spu.gpr[op.rt].vf = _mm_shuffle_ps(t, t, 0x72);
 }
 
-void spu_interpreter::fast::FSCRWR(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FSCRWR(SPUThread& spu, spu_opcode_t op)
 {
 }
 
@@ -860,7 +875,7 @@ void spu_interpreter::DFTSV(SPUThread& spu, spu_opcode_t op)
 	throw EXCEPTION("Unexpected instruction");
 }
 
-void spu_interpreter::fast::FCEQ(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FCEQ(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vf = _mm_cmpeq_ps(spu.gpr[op.rb].vf, spu.gpr[op.ra].vf);
 }
@@ -896,7 +911,7 @@ void spu_interpreter::CEQH(SPUThread& spu, spu_opcode_t op)
 	spu.gpr[op.rt].vi = _mm_cmpeq_epi16(spu.gpr[op.ra].vi, spu.gpr[op.rb].vi);
 }
 
-void spu_interpreter::fast::FCMEQ(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FCMEQ(SPUThread& spu, spu_opcode_t op)
 {
 	const auto mask = _mm_castsi128_ps(_mm_set1_epi32(0x7fffffff));
 	spu.gpr[op.rt].vf = _mm_cmpeq_ps(_mm_and_ps(spu.gpr[op.rb].vf, mask), _mm_and_ps(spu.gpr[op.ra].vf, mask));
@@ -919,7 +934,7 @@ void spu_interpreter::CEQB(SPUThread& spu, spu_opcode_t op)
 	spu.gpr[op.rt].vi = _mm_cmpeq_epi8(spu.gpr[op.ra].vi, spu.gpr[op.rb].vi);
 }
 
-void spu_interpreter::fast::FI(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FI(SPUThread& spu, spu_opcode_t op)
 {
 	// TODO
 	const auto mask_se = _mm_castsi128_ps(_mm_set1_epi32(0xff800000)); // sign and exponent mask
@@ -941,25 +956,25 @@ void spu_interpreter::HEQ(SPUThread& spu, spu_opcode_t op)
 }
 
 
-void spu_interpreter::fast::CFLTS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::CFLTS(SPUThread& spu, spu_opcode_t op)
 {
 	const auto scaled = _mm_mul_ps(spu.gpr[op.ra].vf, g_spu_imm.scale[173 - op.i8]);
 	spu.gpr[op.rt].vi = _mm_xor_si128(_mm_cvttps_epi32(scaled), _mm_castps_si128(_mm_cmpge_ps(scaled, _mm_set1_ps(0x80000000))));
 }
 
-void spu_interpreter::fast::CFLTU(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::CFLTU(SPUThread& spu, spu_opcode_t op)
 {
 	const auto scaled1 = _mm_max_ps(_mm_mul_ps(spu.gpr[op.ra].vf, g_spu_imm.scale[173 - op.i8]), _mm_set1_ps(0.0f));
 	const auto scaled2 = _mm_and_ps(_mm_sub_ps(scaled1, _mm_set1_ps(0x80000000)), _mm_cmpge_ps(scaled1, _mm_set1_ps(0x80000000)));
 	spu.gpr[op.rt].vi = _mm_or_si128(_mm_or_si128(_mm_cvttps_epi32(scaled1), _mm_cvttps_epi32(scaled2)), _mm_castps_si128(_mm_cmpge_ps(scaled1, _mm_set1_ps(0x100000000))));
 }
 
-void spu_interpreter::fast::CSFLT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::CSFLT(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt].vf = _mm_mul_ps(_mm_cvtepi32_ps(spu.gpr[op.ra].vi), g_spu_imm.scale[op.i8 - 155]);
 }
 
-void spu_interpreter::fast::CUFLT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::CUFLT(SPUThread& spu, spu_opcode_t op)
 {
 	const auto a = spu.gpr[op.ra].vi;
 	const auto fix = _mm_and_ps(_mm_castsi128_ps(_mm_srai_epi32(a, 31)), _mm_set1_ps(0x80000000));
@@ -1266,17 +1281,17 @@ void spu_interpreter::MPYA(SPUThread& spu, spu_opcode_t op)
 	spu.gpr[op.rt4].vi = _mm_add_epi32(spu.gpr[op.rc].vi, _mm_madd_epi16(_mm_and_si128(spu.gpr[op.ra].vi, mask), _mm_and_si128(spu.gpr[op.rb].vi, mask)));
 }
 
-void spu_interpreter::fast::FNMS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FNMS(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt4].vf = _mm_sub_ps(spu.gpr[op.rc].vf, _mm_mul_ps(spu.gpr[op.ra].vf, spu.gpr[op.rb].vf));
 }
 
-void spu_interpreter::fast::FMA(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FMA(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt4].vf = _mm_add_ps(_mm_mul_ps(spu.gpr[op.ra].vf, spu.gpr[op.rb].vf), spu.gpr[op.rc].vf);
 }
 
-void spu_interpreter::fast::FMS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_fast::FMS(SPUThread& spu, spu_opcode_t op)
 {
 	spu.gpr[op.rt4].vf = _mm_sub_ps(_mm_mul_ps(spu.gpr[op.ra].vf, spu.gpr[op.rb].vf), spu.gpr[op.rc].vf);
 }
@@ -1361,7 +1376,7 @@ inline bool isdenormal(double x)
 #endif
 }
 
-void spu_interpreter::precise::FREST(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FREST(SPUThread& spu, spu_opcode_t op)
 {
 	SetHostRoundingMode(FPSCR_RN_ZERO);
 	for (int i = 0; i < 4; i++)
@@ -1381,7 +1396,7 @@ void spu_interpreter::precise::FREST(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::FRSQEST(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FRSQEST(SPUThread& spu, spu_opcode_t op)
 {
 	SetHostRoundingMode(FPSCR_RN_ZERO);
 	for (int i = 0; i < 4; i++)
@@ -1401,7 +1416,7 @@ void spu_interpreter::precise::FRSQEST(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::FCGT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FCGT(SPUThread& spu, spu_opcode_t op)
 {
 	for (int i = 0; i < 4; i++)
 	{
@@ -1509,11 +1524,11 @@ static void FA_FS(SPUThread& spu, spu_opcode_t op, bool sub)
 	}
 }
 
-void spu_interpreter::precise::FA(SPUThread& spu, spu_opcode_t op) { FA_FS(spu, op, false); }
+void spu_interpreter_precise::FA(SPUThread& spu, spu_opcode_t op) { FA_FS(spu, op, false); }
 
-void spu_interpreter::precise::FS(SPUThread& spu, spu_opcode_t op) { FA_FS(spu, op, true); }
+void spu_interpreter_precise::FS(SPUThread& spu, spu_opcode_t op) { FA_FS(spu, op, true); }
 
-void spu_interpreter::precise::FM(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FM(SPUThread& spu, spu_opcode_t op)
 {
 	SetHostRoundingMode(FPSCR_RN_ZERO);
 	for (int w = 0; w < 4; w++)
@@ -1586,7 +1601,7 @@ void spu_interpreter::precise::FM(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::FCMGT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FCMGT(SPUThread& spu, spu_opcode_t op)
 {
 	for (int i = 0; i < 4; i++)
 	{
@@ -1667,11 +1682,11 @@ static void DFASM(SPUThread& spu, spu_opcode_t op, DoubleOp operation)
 	}
 }
 
-void spu_interpreter::precise::DFA(SPUThread& spu, spu_opcode_t op) { DFASM(spu, op, DFASM_A); }
+void spu_interpreter_precise::DFA(SPUThread& spu, spu_opcode_t op) { DFASM(spu, op, DFASM_A); }
 
-void spu_interpreter::precise::DFS(SPUThread& spu, spu_opcode_t op) { DFASM(spu, op, DFASM_S); }
+void spu_interpreter_precise::DFS(SPUThread& spu, spu_opcode_t op) { DFASM(spu, op, DFASM_S); }
 
-void spu_interpreter::precise::DFM(SPUThread& spu, spu_opcode_t op) { DFASM(spu, op, DFASM_M); }
+void spu_interpreter_precise::DFM(SPUThread& spu, spu_opcode_t op) { DFASM(spu, op, DFASM_M); }
 
 static void DFMA(SPUThread& spu, spu_opcode_t op, bool neg, bool sub)
 {
@@ -1728,20 +1743,20 @@ static void DFMA(SPUThread& spu, spu_opcode_t op, bool neg, bool sub)
 	}
 }
 
-void spu_interpreter::precise::DFMA(SPUThread& spu, spu_opcode_t op) { DFMA(spu, op, false, false); }
+void spu_interpreter_precise::DFMA(SPUThread& spu, spu_opcode_t op) { ::DFMA(spu, op, false, false); }
 
-void spu_interpreter::precise::DFMS(SPUThread& spu, spu_opcode_t op) { DFMA(spu, op, false, true); }
+void spu_interpreter_precise::DFMS(SPUThread& spu, spu_opcode_t op) { ::DFMA(spu, op, false, true); }
 
-void spu_interpreter::precise::DFNMS(SPUThread& spu, spu_opcode_t op) { DFMA(spu, op, true, true); }
+void spu_interpreter_precise::DFNMS(SPUThread& spu, spu_opcode_t op) { ::DFMA(spu, op, true, true); }
 
-void spu_interpreter::precise::DFNMA(SPUThread& spu, spu_opcode_t op) { DFMA(spu, op, true, false); }
+void spu_interpreter_precise::DFNMA(SPUThread& spu, spu_opcode_t op) { ::DFMA(spu, op, true, false); }
 
-void spu_interpreter::precise::FSCRRD(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FSCRRD(SPUThread& spu, spu_opcode_t op)
 {
 	spu.fpscr.Read(spu.gpr[op.rt]);
 }
 
-void spu_interpreter::precise::FESD(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FESD(SPUThread& spu, spu_opcode_t op)
 {
 	for (int i = 0; i < 2; i++)
 	{
@@ -1765,7 +1780,7 @@ void spu_interpreter::precise::FESD(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::FRDS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FRDS(SPUThread& spu, spu_opcode_t op)
 {
 	for (int i = 0; i < 2; i++)
 	{
@@ -1793,12 +1808,12 @@ void spu_interpreter::precise::FRDS(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::FSCRWR(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FSCRWR(SPUThread& spu, spu_opcode_t op)
 {
 	spu.fpscr.Write(spu.gpr[op.ra]);
 }
 
-void spu_interpreter::precise::FCEQ(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FCEQ(SPUThread& spu, spu_opcode_t op)
 {
 	for (int i = 0; i < 4; i++)
 	{
@@ -1813,7 +1828,7 @@ void spu_interpreter::precise::FCEQ(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::FCMEQ(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FCMEQ(SPUThread& spu, spu_opcode_t op)
 {
 	for (int i = 0; i < 4; i++)
 	{
@@ -1828,13 +1843,13 @@ void spu_interpreter::precise::FCMEQ(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::FI(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::FI(SPUThread& spu, spu_opcode_t op)
 {
 	// TODO
 	spu.gpr[op.rt] = spu.gpr[op.rb];
 }
 
-void spu_interpreter::precise::CFLTS(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::CFLTS(SPUThread& spu, spu_opcode_t op)
 {
 	const int scale = 173 - (op.i8 & 0xff); //unsigned immediate
 	for (int i = 0; i < 4; i++)
@@ -1856,7 +1871,7 @@ void spu_interpreter::precise::CFLTS(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::CFLTU(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::CFLTU(SPUThread& spu, spu_opcode_t op)
 {
 	const int scale = 173 - (op.i8 & 0xff); //unsigned immediate
 	for (int i = 0; i < 4; i++)
@@ -1878,7 +1893,7 @@ void spu_interpreter::precise::CFLTU(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::CSFLT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::CSFLT(SPUThread& spu, spu_opcode_t op)
 {
 	SetHostRoundingMode(FPSCR_RN_ZERO);
 	const int scale = 155 - (op.i8 & 0xff); //unsigned immediate
@@ -1901,7 +1916,7 @@ void spu_interpreter::precise::CSFLT(SPUThread& spu, spu_opcode_t op)
 	}
 }
 
-void spu_interpreter::precise::CUFLT(SPUThread& spu, spu_opcode_t op)
+void spu_interpreter_precise::CUFLT(SPUThread& spu, spu_opcode_t op)
 {
 	SetHostRoundingMode(FPSCR_RN_ZERO);
 	const int scale = 155 - (op.i8 & 0xff); //unsigned immediate
@@ -2069,8 +2084,8 @@ static void FMA(SPUThread& spu, spu_opcode_t op, bool neg, bool sub)
 	}
 }
 
-void spu_interpreter::precise::FNMS(SPUThread& spu, spu_opcode_t op) { FMA(spu, op, true, true); }
+void spu_interpreter_precise::FNMS(SPUThread& spu, spu_opcode_t op) { ::FMA(spu, op, true, true); }
 
-void spu_interpreter::precise::FMA(SPUThread& spu, spu_opcode_t op) { FMA(spu, op, false, false); }
+void spu_interpreter_precise::FMA(SPUThread& spu, spu_opcode_t op) { ::FMA(spu, op, false, false); }
 
-void spu_interpreter::precise::FMS(SPUThread& spu, spu_opcode_t op) { FMA(spu, op, false, true); }
+void spu_interpreter_precise::FMS(SPUThread& spu, spu_opcode_t op) { ::FMA(spu, op, false, true); }

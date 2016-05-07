@@ -1,75 +1,90 @@
 #pragma once
 
-struct vfsStream;
+#include <map>
 
-struct PSFHeader
+namespace psf
 {
-	u32 magic;
-	u32 version;
-	u32 off_key_table;
-	u32 off_data_table;
-	u32 entries_num;
-};
-
-struct PSFDefTable
-{
-	u16 key_off;
-	u16 param_fmt;
-	u32 param_len;
-	u32 param_max;
-	u32 data_off;
-};
-
-enum : u16
-{
-	PSF_PARAM_UNK = 0x0004,
-	PSF_PARAM_STR = 0x0204,
-	PSF_PARAM_INT = 0x0404,
-};
-
-struct PSFEntry
-{
-	u16 fmt;
-	std::string name;
-
-	s32 vint;
-	std::string vstr;
-};
-
-class PSFLoader
-{
-	std::vector<PSFEntry> m_entries;
-
-public:
-	PSFLoader() = default;
-
-	PSFLoader(vfsStream& stream)
+	enum class format : u16
 	{
-		Load(stream);
+		array   = 0x0004, // claimed to be a non-NTS string (char array)
+		string  = 0x0204,
+		integer = 0x0404,
+	};
+
+	class entry final
+	{
+		std::string m_value_string;
+		u32 m_value_integer; // TODO: is it really unsigned?
+		u32 m_max_size; // Entry max size (supplementary info, stored in PSF format)
+		format m_type;
+
+	public:
+		// Construct string entry, assign the value
+		entry(format type, u32 max_size, const std::string& value = {})
+			: m_type(type)
+			, m_max_size(max_size)
+			, m_value_string(value)
+		{
+			Expects(type == format::string || type == format::array);
+			Expects(max_size);
+		}
+
+		// Construct integer entry, assign the value
+		entry(u32 value)
+			: m_type(format::integer)
+			, m_max_size(sizeof(u32))
+			, m_value_integer(value)
+		{
+		}
+
+		const std::string& as_string() const;
+		u32 as_integer() const;
+
+		entry& operator =(const std::string& value);
+		entry& operator =(u32 value);
+
+		format type() const { return m_type; }
+		u32 max() const { return m_max_size; }
+		u32 size() const;
+	};
+
+	// Define PSF registry as a sorted map of entries:
+	using registry = std::map<std::string, entry>;
+
+	// Load PSF registry from SFO binary data
+	registry load_object(const std::vector<char>&);
+
+	// Load PSF registry from SFO file, if opened
+	inline registry load_object(const fs::file& f)
+	{
+		if (f)
+		{
+			return load_object(f.to_vector<char>());
+		}
+		else
+		{
+			return registry{};
+		}
 	}
 
-	virtual ~PSFLoader() = default;
+	// Convert PSF registry to SFO binary format
+	std::vector<char> save_object(const registry&);
 
-	bool Load(vfsStream& stream);
+	// Get string value or default value
+	std::string get_string(const registry& psf, const std::string& key, const std::string& def = {});
 
-	bool Save(vfsStream& stream) const;
+	// Get integer value or default value
+	u32 get_integer(const registry& psf, const std::string& key, u32 def = 0);
 
-	void Clear();
-
-	operator bool() const
+	// Make string entry
+	inline entry string(u32 max_size, const std::string& value)
 	{
-		return !m_entries.empty();
+		return{ format::string, max_size, value };
 	}
 
-	const PSFEntry* SearchEntry(const std::string& key) const;
-
-	PSFEntry& AddEntry(const std::string& key, u16 type);
-
-	std::string GetString(const std::string& key, std::string def = "") const;
-
-	s32 GetInteger(const std::string& key, s32 def = 0) const;
-
-	void SetString(const std::string& key, std::string value);
-
-	void SetInteger(const std::string& key, s32 value);
-};
+	// Make array entry
+	inline entry array(u32 max_size, const std::string& value)
+	{
+		return{ format::array, max_size, value };
+	}
+}
