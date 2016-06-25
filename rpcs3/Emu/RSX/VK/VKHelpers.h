@@ -14,6 +14,7 @@
 #include "../Common/TextureUtils.h"
 #include "../Common/ring_buffer_helper.h"
 
+#define DESCRIPTOR_MAX_DRAW_CALLS 1024
 extern cfg::bool_entry g_cfg_rsx_debug_output;
 
 namespace rsx
@@ -66,7 +67,7 @@ namespace vk
 	void copy_scaled_image(VkCommandBuffer cmd, VkImage &src, VkImage &dst, VkImageLayout srcLayout, VkImageLayout dstLayout, u32 src_width, u32 src_height, u32 dst_width, u32 dst_height, u32 mipmaps, VkImageAspectFlagBits aspect);
 
 	VkFormat get_compatible_sampler_format(u32 format);
-	VkFormat get_compatible_surface_format(rsx::surface_color_format color_format);
+	std::pair<VkFormat, VkComponentMapping> get_compatible_surface_format(rsx::surface_color_format color_format);
 	size_t get_render_pass_location(VkFormat color_surface_format, VkFormat depth_stencil_format, u8 color_surface_count);
 
 	struct memory_type_mapping
@@ -336,6 +337,7 @@ namespace vk
 	struct image
 	{
 		VkImage value;
+		VkComponentMapping native_layout = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
 		VkImageCreateInfo info = {};
 		std::shared_ptr<vk::memory_block> memory;
 
@@ -569,7 +571,7 @@ namespace vk
 			info.minFilter = min_filter;
 			info.mipmapMode = mipmap_mode;
 			info.compareOp = VK_COMPARE_OP_NEVER;
-			info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+			info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
 
 			CHECK_RESULT(vkCreateSampler(m_device, &info, nullptr, &value));
 		}
@@ -1211,7 +1213,7 @@ namespace vk
 		{
 			VkDescriptorPoolCreateInfo infos = {};
 			infos.flags = 0;
-			infos.maxSets = 1000;
+			infos.maxSets = DESCRIPTOR_MAX_DRAW_CALLS;
 			infos.poolSizeCount = size_descriptors_count;
 			infos.pPoolSizes = sizes;
 			infos.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;

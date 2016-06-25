@@ -10,7 +10,9 @@
 #include "Loader/PSF.h"
 #include "Utilities/StrUtil.h"
 
-LOG_CHANNEL(cellGame);
+#include <thread>
+
+logs::channel cellGame("cellGame", logs::level::notice);
 
 // Normal content directory (if is_temporary is not involved):
 // contentInfo = dir
@@ -85,13 +87,14 @@ s32 cellHddGameCheck(PPUThread& ppu, u32 version, vm::cptr<char> dirName, u32 er
 		// TODO: Is cellHddGameCheck really responsible for writing the information in get->getParam ? (If not, delete this else)
 		const auto& psf = psf::load_object(fs::file(local_dir +"/PARAM.SFO"));
 
-		get->getParam.parentalLevel = psf.at("PARENTAL_LEVEL").as_integer();
-		get->getParam.attribute = psf.at("ATTRIBUTE").as_integer();
-		get->getParam.resolution = psf.at("RESOLUTION").as_integer();
-		get->getParam.soundFormat = psf.at("SOUND_FORMAT").as_integer();
-		strcpy_trunc(get->getParam.title, psf.at("TITLE").as_string());
-		strcpy_trunc(get->getParam.dataVersion, psf.at("APP_VER").as_string());
-		strcpy_trunc(get->getParam.titleId, psf.at("TITLE_ID").as_string());
+		// Some following fields may be zero in old FW 1.00 version PARAM.SFO 
+		if (psf.count("PARENTAL_LEVEL") != 0) get->getParam.parentalLevel = psf.at("PARENTAL_LEVEL").as_integer();
+		if (psf.count("ATTRIBUTE") != 0) get->getParam.attribute = psf.at("ATTRIBUTE").as_integer();
+		if (psf.count("RESOLUTION") != 0) get->getParam.resolution = psf.at("RESOLUTION").as_integer();
+		if (psf.count("SOUND_FORMAT") != 0) get->getParam.soundFormat = psf.at("SOUND_FORMAT").as_integer();
+		if (psf.count("TITLE") != 0) strcpy_trunc(get->getParam.title, psf.at("TITLE").as_string());
+		if (psf.count("APP_VER") != 0) strcpy_trunc(get->getParam.dataVersion, psf.at("APP_VER").as_string());
+		if (psf.count("TITLE_ID") != 0) strcpy_trunc(get->getParam.titleId, psf.at("TITLE_ID").as_string());
 
 		for (u32 i = 0; i < CELL_HDDGAME_SYSP_LANGUAGE_NUM; i++)
 		{
@@ -308,7 +311,7 @@ ppu_error_code cellGameContentPermit(vm::ptr<char[CELL_GAME_PATH_MAX]> contentIn
 		}
 
 		// Create PARAM.SFO
-		fs::file(dir + "/PARAM.SFO", fs::rewrite).write(psf::save_object(prm->sfo));
+		psf::save_object(fs::file(dir + "/PARAM.SFO", fs::rewrite), prm->sfo);
 
 		// Disable deletion
 		prm->is_temporary = false;
@@ -555,7 +558,7 @@ ppu_error_code cellGameGetParamString(s32 id, vm::ptr<char> buf, u32 bufsize)
 	std::string&& value = psf::get_string(prm->sfo, key);
 	value.resize(bufsize - 1);
 
-	std::copy_n(value.c_str(), value.size() + 1, buf.get_ptr());
+	std::memcpy(buf.get_ptr(), value.c_str(), bufsize);
 
 	return CELL_OK;
 }

@@ -1,5 +1,4 @@
 #include "stdafx.h"
-#include "Utilities/Config.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
@@ -10,7 +9,7 @@
 #include "Utilities/StrUtil.h"
 #include <cerrno>
 
-LOG_CHANNEL(sys_fs);
+logs::channel sys_fs("sys_fs", logs::level::notice);
 
 s32 sys_fs_test(u32 arg1, u32 arg2, vm::ptr<u32> arg3, u32 arg4, vm::ptr<char> arg5, u32 arg6)
 {
@@ -125,7 +124,12 @@ s32 sys_fs_open(vm::cptr<char> path, s32 flags, vm::ptr<u32> fd, s32 mode, vm::c
 
 s32 sys_fs_read(u32 fd, vm::ptr<void> buf, u64 nbytes, vm::ptr<u64> nread)
 {
-	sys_fs.trace("sys_fs_read(fd=%d, buf=0x%x, nbytes=0x%llx, nread=0x%x)", fd, buf, nbytes, nread);
+	sys_fs.trace("sys_fs_read(fd=%d, buf=*0x%x, nbytes=0x%llx, nread=*0x%x)", fd, buf, nbytes, nread);
+
+	if (!buf)
+	{
+		return CELL_EFAULT;
+	}
 
 	const auto file = idm::get<lv2_file_t>(fd);
 
@@ -136,7 +140,8 @@ s32 sys_fs_read(u32 fd, vm::ptr<void> buf, u64 nbytes, vm::ptr<u64> nread)
 
 	std::lock_guard<std::mutex> lock(file->mutex);
 
-	*nread = file->file.read(buf.get_ptr(), nbytes);
+	std::unique_ptr<u8[]> local_buf(new u8[nbytes]);
+	std::memcpy(buf.get_ptr(), local_buf.get(), *nread = file->file.read(local_buf.get(), nbytes));
 
 	return CELL_OK;
 }
@@ -156,7 +161,9 @@ s32 sys_fs_write(u32 fd, vm::cptr<void> buf, u64 nbytes, vm::ptr<u64> nwrite)
 
 	std::lock_guard<std::mutex> lock(file->mutex);
 
-	*nwrite = file->file.write(buf.get_ptr(), nbytes);
+	std::unique_ptr<u8[]> local_buf(new u8[nbytes]);
+	std::memcpy(local_buf.get(), buf.get_ptr(), nbytes);
+	*nwrite = file->file.write(local_buf.get(), nbytes);
 
 	return CELL_OK;
 }
@@ -352,9 +359,9 @@ s32 sys_fs_rmdir(vm::cptr<char> path)
 
 	if (!fs::remove_dir(vfs::get(path.get_ptr())))
 	{
-		switch (auto error = fs::error)
+		switch (auto error = fs::g_tls_error)
 		{
-		case ENOENT: return CELL_FS_ENOENT;
+		case fs::error::noent: return CELL_FS_ENOENT;
 		default: sys_fs.error("sys_fs_rmdir(): unknown error %d", error);
 		}
 
@@ -372,9 +379,9 @@ s32 sys_fs_unlink(vm::cptr<char> path)
 
 	if (!fs::remove_file(vfs::get(path.get_ptr())))
 	{
-		switch (auto error = fs::error)
+		switch (auto error = fs::g_tls_error)
 		{
-		case ENOENT: return CELL_FS_ENOENT;
+		case fs::error::noent: return CELL_FS_ENOENT;
 		default: sys_fs.error("sys_fs_unlink(): unknown error %d", error);
 		}
 
@@ -451,9 +458,9 @@ s32 sys_fs_truncate(vm::cptr<char> path, u64 size)
 
 	if (!fs::truncate_file(vfs::get(path.get_ptr()), size))
 	{
-		switch (auto error = fs::error)
+		switch (auto error = fs::g_tls_error)
 		{
-		case ENOENT: return CELL_FS_ENOENT;
+		case fs::error::noent: return CELL_FS_ENOENT;
 		default: sys_fs.error("sys_fs_truncate(): unknown error %d", error);
 		}
 
@@ -478,9 +485,9 @@ s32 sys_fs_ftruncate(u32 fd, u64 size)
 
 	if (!file->file.trunc(size))
 	{
-		switch (auto error = fs::error)
+		switch (auto error = fs::g_tls_error)
 		{
-		case 0:
+		case fs::error::ok:
 		default: sys_fs.error("sys_fs_ftruncate(): unknown error %d", error);
 		}
 

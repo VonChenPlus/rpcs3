@@ -1,6 +1,6 @@
+#ifdef _MSC_VER
 #include "stdafx.h"
 #include "stdafx_d3d12.h"
-#ifdef _MSC_VER
 #include "Utilities/Config.h"
 #include "D3D12GSRender.h"
 #include <wrl/client.h>
@@ -9,6 +9,7 @@
 #include <chrono>
 #include <locale>
 #include <codecvt>
+#include <cmath>
 #include "d3dx12.h"
 #include <d3d11on12.h>
 #include "D3D12Formats.h"
@@ -43,13 +44,13 @@ HMODULE D3DCompiler;
 
 void loadD3D12FunctionPointers()
 {
-	ASSERT(D3D12Module = LoadLibrary(L"d3d12.dll"));
+	VERIFY(D3D12Module = LoadLibrary(L"d3d12.dll"));
 	wrapD3D12CreateDevice = (PFN_D3D12_CREATE_DEVICE)GetProcAddress(D3D12Module, "D3D12CreateDevice");
 	wrapD3D12GetDebugInterface = (PFN_D3D12_GET_DEBUG_INTERFACE)GetProcAddress(D3D12Module, "D3D12GetDebugInterface");
 	wrapD3D12SerializeRootSignature = (PFN_D3D12_SERIALIZE_ROOT_SIGNATURE)GetProcAddress(D3D12Module, "D3D12SerializeRootSignature");
-	ASSERT(D3D11Module = LoadLibrary(L"d3d11.dll"));
+	VERIFY(D3D11Module = LoadLibrary(L"d3d11.dll"));
 	wrapD3D11On12CreateDevice = (PFN_D3D11ON12_CREATE_DEVICE)GetProcAddress(D3D11Module, "D3D11On12CreateDevice");
-	ASSERT(D3DCompiler = LoadLibrary(L"d3dcompiler_47.dll"));
+	VERIFY(D3DCompiler = LoadLibrary(L"d3dcompiler_47.dll"));
 	wrapD3DCompile = (pD3DCompile)GetProcAddress(D3DCompiler, "D3DCompile");
 }
 
@@ -166,6 +167,7 @@ D3D12GSRender::D3D12GSRender()
 		// Adapter with specified name
 		if (adapter_name == desc.Description)
 		{
+			vram_size = desc.DedicatedVideoMemory != 0 ? desc.DedicatedVideoMemory : desc.DedicatedSystemMemory;
 			break;
 		}
 
@@ -243,7 +245,7 @@ D3D12GSRender::D3D12GSRender()
 
 	m_rtts.init(m_device.Get());
 	m_readback_resources.init(m_device.Get(), 1024 * 1024 * 128, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
-	m_buffer_data.init(m_device.Get(), 1024 * 1024 * 896, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+	m_buffer_data.init(m_device.Get(), std::min((size_t)(1024 * 1024 * 896), (size_t)(vram_size - (1024 * 1024 * 128))), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
 
 	CHECK_HRESULT(
 		m_device->CreateCommittedResource(
@@ -486,7 +488,7 @@ void D3D12GSRender::flip(int buffer)
 	if (!is_flip_surface_in_global_memory(rsx::to_surface_target(rsx::method_registers[NV4097_SET_SURFACE_COLOR_TARGET])))
 	{
 		resource_storage &storage = get_current_resource_storage();
-		ASSERT(storage.ram_framebuffer == nullptr);
+		VERIFY(storage.ram_framebuffer == nullptr);
 
 		size_t w = 0, h = 0, row_pitch = 0;
 
@@ -508,23 +510,26 @@ void D3D12GSRender::flip(int buffer)
 				memcpy((char*)mapped_buffer + row * row_pitch, (char*)src_buffer + row * w * 4, w * 4);
 			m_buffer_data.unmap(CD3DX12_RANGE(heap_offset, heap_offset + texture_size));
 			offset = heap_offset;
-		}
 
-		CHECK_HRESULT(
-			m_device->CreateCommittedResource(
-				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-				D3D12_HEAP_FLAG_NONE,
-				&CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, (UINT)w, (UINT)h, 1, 1),
-				D3D12_RESOURCE_STATE_COPY_DEST,
-				nullptr,
-				IID_PPV_ARGS(storage.ram_framebuffer.GetAddressOf())
+			CHECK_HRESULT(
+				m_device->CreateCommittedResource(
+					&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+					D3D12_HEAP_FLAG_NONE,
+					&CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM, (UINT)w, (UINT)h, 1, 1),
+					D3D12_RESOURCE_STATE_COPY_DEST,
+					nullptr,
+					IID_PPV_ARGS(storage.ram_framebuffer.GetAddressOf())
 				)
 			);
-		get_current_resource_storage().command_list->CopyTextureRegion(&CD3DX12_TEXTURE_COPY_LOCATION(storage.ram_framebuffer.Get(), 0), 0, 0, 0,
-			&CD3DX12_TEXTURE_COPY_LOCATION(m_buffer_data.get_heap(), { offset, { DXGI_FORMAT_R8G8B8A8_UNORM, (UINT)w, (UINT)h, 1, (UINT)row_pitch } }), nullptr);
+			get_current_resource_storage().command_list->CopyTextureRegion(&CD3DX12_TEXTURE_COPY_LOCATION(storage.ram_framebuffer.Get(), 0), 0, 0, 0,
+				&CD3DX12_TEXTURE_COPY_LOCATION(m_buffer_data.get_heap(), { offset,{ DXGI_FORMAT_R8G8B8A8_UNORM, (UINT)w, (UINT)h, 1, (UINT)row_pitch } }), nullptr);
 
-		get_current_resource_storage().command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(storage.ram_framebuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ));
-		resource_to_flip = storage.ram_framebuffer.Get();
+			get_current_resource_storage().command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(storage.ram_framebuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ));
+			resource_to_flip = storage.ram_framebuffer.Get();
+		}
+		else
+			resource_to_flip = nullptr;
+
 		viewport_w = (float)w, viewport_h = (float)h;
 	}
 	else

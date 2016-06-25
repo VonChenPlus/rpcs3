@@ -15,6 +15,7 @@
 #include "SettingsDialog.h"
 
 #include <set>
+#include <unordered_set>
 
 // Node location
 using cfg_location = std::vector<const char*>;
@@ -253,7 +254,7 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
 
 	// Graphics
 	wxStaticBoxSizer* s_round_gs_render = new wxStaticBoxSizer(wxVERTICAL, p_graphics, "Render");
-	wxStaticBoxSizer* s_round_gs_d3d_adapter = new wxStaticBoxSizer(wxVERTICAL, p_graphics, "D3D Adaptater");
+	wxStaticBoxSizer* s_round_gs_d3d_adapter = new wxStaticBoxSizer(wxVERTICAL, p_graphics, "D3D Adapter");
 	wxStaticBoxSizer* s_round_gs_res = new wxStaticBoxSizer(wxVERTICAL, p_graphics, "Resolution");
 	wxStaticBoxSizer* s_round_gs_aspect = new wxStaticBoxSizer(wxVERTICAL, p_graphics, "Aspect ratio");
 	wxStaticBoxSizer* s_round_gs_frame_limit = new wxStaticBoxSizer(wxVERTICAL, p_graphics, "Frame limit");
@@ -292,7 +293,7 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
 	wxComboBox* cbox_sys_lang = new wxComboBox(p_system, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, NULL, wxCB_READONLY);
 
 	wxCheckBox* chbox_core_hook_stfunc = new wxCheckBox(p_core, wxID_ANY, "Hook static functions");
-	wxCheckBox* chbox_core_load_liblv2 = new wxCheckBox(p_core, wxID_ANY, "Load liblv2.sprx");
+	wxCheckBox* chbox_core_load_liblv2 = new wxCheckBox(p_core, wxID_ANY, "Load liblv2.sprx only");
 	wxCheckBox* chbox_vfs_enable_host_root = new wxCheckBox(p_system, wxID_ANY, "Enable /host_root/");
 	wxCheckBox* chbox_gs_log_prog = new wxCheckBox(p_graphics, wxID_ANY, "Log shader programs");
 	wxCheckBox* chbox_gs_dump_depth = new wxCheckBox(p_graphics, wxID_ANY, "Write Depth Buffer");
@@ -339,7 +340,6 @@ SettingsDialog::SettingsDialog(wxWindow* parent)
 	radiobox_pad_helper ppu_decoder_modes({ "Core", "PPU Decoder" });
 	rbox_ppu_decoder = new wxRadioBox(p_core, wxID_ANY, "PPU Decoder", wxDefaultPosition, wxSize(-1, -1), ppu_decoder_modes, 1);
 	pads.emplace_back(std::make_unique<radiobox_pad>(std::move(ppu_decoder_modes), rbox_ppu_decoder));
-	rbox_ppu_decoder->Enable(2, false); // TODO
 
 	radiobox_pad_helper spu_decoder_modes({ "Core", "SPU Decoder" });
 	rbox_spu_decoder = new wxRadioBox(p_core, wxID_ANY, "SPU Decoder", wxDefaultPosition, wxSize(-1, -1), spu_decoder_modes, 1);

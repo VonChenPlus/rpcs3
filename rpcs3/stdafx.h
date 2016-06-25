@@ -8,9 +8,9 @@
 
 #define NOMINMAX
 
-#ifndef __STDC_CONSTANT_MACROS
-#define __STDC_CONSTANT_MACROS
-#endif
+//#ifndef __STDC_CONSTANT_MACROS
+//#define __STDC_CONSTANT_MACROS
+//#endif
 
 #if defined(MSVC_CRT_MEMLEAK_DETECTION) && defined(_DEBUG) && !defined(DBG_NEW)
 	#define DBG_NEW new ( _NORMAL_BLOCK , __FILE__ , __LINE__ )
@@ -23,26 +23,25 @@
 #include <cstdint>
 #include <climits>
 #include <cstring>
+#include <exception>
 #include <string>
-#include <mutex>
-#include <condition_variable>
 #include <memory>
 #include <vector>
 #include <array>
 #include <functional>
-#include <algorithm>
-#include <unordered_set>
 #include <unordered_map>
-#include <chrono>
 
-using namespace std::string_literals;
-using namespace std::chrono_literals;
+// MSVC bug workaround
+#ifdef _MSC_VER
+namespace std { inline namespace literals { inline namespace chrono_literals {}}}
+#endif
+
+using namespace std::literals;
 
 // Obsolete, throw fmt::exception directly. Use 'HERE' macro, if necessary.
 #define EXCEPTION(format_str, ...) fmt::exception("%s(): " format_str HERE, __FUNCTION__, ##__VA_ARGS__)
 
 #define _PRGNAME_ "RPCS3"
-#define _PRGVER_ "0.0.0.9"
 
 #include "Utilities/types.h"
 #include "Utilities/Macro.h"

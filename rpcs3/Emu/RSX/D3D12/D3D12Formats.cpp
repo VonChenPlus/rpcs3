@@ -1,6 +1,6 @@
+#ifdef _MSC_VER
 #include "stdafx.h"
 #include "stdafx_d3d12.h"
-#ifdef _MSC_VER
 #include "D3D12Formats.h"
 #include "D3D12Utils.h"
 #include "Emu/RSX/GCM.h"
@@ -128,8 +128,6 @@ D3D12_COMPARISON_FUNC get_compare_func(u32 op)
 	case CELL_GCM_NOTEQUAL: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
 	case CELL_GCM_GEQUAL: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
 	case CELL_GCM_ALWAYS: return D3D12_COMPARISON_FUNC_ALWAYS;
-	case CELL_GCM_ZERO:
-		break;
 	}
 	throw EXCEPTION("Invalid or unsupported compare func (0x%x)", op);
 }
@@ -303,12 +301,12 @@ DXGI_FORMAT get_color_surface_format(rsx::surface_color_format format)
 	switch (format)
 	{
 	case rsx::surface_color_format::r5g6b5: return DXGI_FORMAT_B5G6R5_UNORM;
-	case rsx::surface_color_format::x8r8g8b8_o8r8g8b8:
-	case rsx::surface_color_format::x8r8g8b8_z8r8g8b8:
 	case rsx::surface_color_format::x8b8g8r8_o8b8g8r8:
 	case rsx::surface_color_format::x8b8g8r8_z8b8g8r8:
-			return DXGI_FORMAT_B8G8R8X8_UNORM; //BIT.TRIP Runner2 use this
-	case rsx::surface_color_format::a8b8g8r8:
+		return DXGI_FORMAT_B8G8R8X8_UNORM;
+	case rsx::surface_color_format::a8b8g8r8: return DXGI_FORMAT_B8G8R8A8_UNORM;
+	case rsx::surface_color_format::x8r8g8b8_o8r8g8b8:
+	case rsx::surface_color_format::x8r8g8b8_z8r8g8b8:
 	case rsx::surface_color_format::a8r8g8b8: return DXGI_FORMAT_R8G8B8A8_UNORM;
 	case rsx::surface_color_format::b8: return DXGI_FORMAT_R8_UNORM;
 	case rsx::surface_color_format::g8b8: return DXGI_FORMAT_R8G8_UNORM;

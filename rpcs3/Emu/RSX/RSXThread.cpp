@@ -12,6 +12,8 @@
 #include "Utilities/GSL.h"
 #include "Utilities/StrUtil.h"
 
+#include <thread>
+
 #define CMD_DEBUG 0
 
 cfg::bool_entry g_cfg_rsx_write_color_buffers(cfg::root.video, "Write Color Buffers");
@@ -33,14 +35,14 @@ namespace rsx
 {
 	std::function<bool(u32 addr, bool is_writing)> g_access_violation_handler;
 
-	std::string shaders_cache::path_to_root()
+	std::string old_shaders_cache::shaders_cache::path_to_root()
 	{
 		return fs::get_executable_dir() + "data/";
 	}
 
-	void shaders_cache::load(const std::string &path, shader_language lang)
+	void old_shaders_cache::shaders_cache::load(const std::string &path, shader_language lang)
 	{
-		const std::string lang_name = bijective_find<shader_language>(lang, "");
+		const std::string lang_name(::unveil<shader_language>::get(lang));
 
 		auto extract_hash = [](const std::string &string)
 		{
@@ -80,7 +82,7 @@ namespace rsx
 		}
 	}
 
-	void shaders_cache::load(shader_language lang)
+	void old_shaders_cache::shaders_cache::load(shader_language lang)
 	{
 		std::string root = path_to_root();
 
@@ -174,7 +176,7 @@ namespace rsx
 			}
 			throw EXCEPTION("Wrong vector size");
 		case vertex_base_type::cmp: return sizeof(u16) * 4;
-		case vertex_base_type::ub256: Expects(size == 4); return sizeof(u8) * 4;
+		case vertex_base_type::ub256: EXPECTS(size == 4); return sizeof(u8) * 4;
 		}
 		throw EXCEPTION("RSXVertexData::GetTypeSize: Bad vertex data type (%d)!", type);
 	}
@@ -561,7 +563,7 @@ namespace rsx
 		}
 		else
 		{
-			Expects(0);
+			EXPECTS(0);
 			//std::lock_guard<std::mutex> lock{ m_mtx_task };
 
 			//internal_task_entry &front = m_internal_tasks.front();
@@ -739,6 +741,55 @@ namespace rsx
 				result.unnormalized_coords |= (1 << i);
 		}
 		result.set_texture_dimension(texture_dimensions);
+
+		return result;
+	}
+
+	raw_program thread::get_raw_program() const
+	{
+		raw_program result;
+
+		u32 fp_info = rsx::method_registers[NV4097_SET_SHADER_PROGRAM];
+
+		result.state.input_attributes = rsx::method_registers[NV4097_SET_VERTEX_ATTRIB_INPUT_MASK];
+		result.state.output_attributes = rsx::method_registers[NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK];
+		result.state.ctrl = rsx::method_registers[NV4097_SET_SHADER_CONTROL];
+		result.state.divider_op = rsx::method_registers[NV4097_SET_FREQUENCY_DIVIDER_OPERATION];
+		 
+		result.state.is_array = 0;
+		result.state.is_int = 0;
+
+		for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
+		{
+			bool is_int = false;
+
+			if (vertex_arrays_info[index].size > 0)
+			{
+				result.state.is_array |= 1 << index;
+				is_int = is_int_type(vertex_arrays_info[index].type);
+				result.state.frequency[index] = vertex_arrays_info[index].frequency;
+			}
+			else if (register_vertex_info[index].size > 0)
+			{
+				is_int = is_int_type(register_vertex_info[index].type);
+				result.state.frequency[index] = register_vertex_info[index].frequency;
+			}
+			else
+			{
+				result.state.frequency[index] = 0;
+			}
+
+			if (is_int)
+			{
+				result.state.is_int |= 1 << index;
+			}
+		}
+
+		result.vertex_shader.ucode_ptr = transform_program;
+		result.vertex_shader.offset = rsx::method_registers[NV4097_SET_TRANSFORM_PROGRAM_START];
+
+		result.fragment_shader.ucode_ptr = vm::base(rsx::get_address(fp_info & ~0x3, (fp_info & 0x3) - 1));
+		result.fragment_shader.offset = 0;
 
 		return result;
 	}

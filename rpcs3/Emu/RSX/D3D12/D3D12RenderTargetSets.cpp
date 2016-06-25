@@ -1,6 +1,6 @@
+#ifdef _MSC_VER
 #include "stdafx.h"
 #include "stdafx_d3d12.h"
-#ifdef _MSC_VER
 #include "Utilities/Config.h"
 #include "D3D12RenderTargetSets.h"
 #include "Emu/Memory/Memory.h"
@@ -123,6 +123,8 @@ namespace
 
 void D3D12GSRender::clear_surface(u32 arg)
 {
+	if (!rsx::method_registers[NV4097_SET_SURFACE_FORMAT]) return;
+
 	std::chrono::time_point<std::chrono::system_clock> start_duration = std::chrono::system_clock::now();
 
 	std::chrono::time_point<std::chrono::system_clock> rtt_duration_start = std::chrono::system_clock::now();

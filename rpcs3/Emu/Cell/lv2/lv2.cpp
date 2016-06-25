@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Utilities/Config.h"
 #include "Utilities/AutoPause.h"
 #include "Emu/System.h"
 
@@ -29,13 +30,33 @@
 #include "sys_fs.h"
 #include "sys_dbg.h"
 
+LOG_CHANNEL(sys_cond);
+LOG_CHANNEL(sys_dbg);
+LOG_CHANNEL(sys_event);
+LOG_CHANNEL(sys_event_flag);
+LOG_CHANNEL(sys_fs);
+LOG_CHANNEL(sys_interrupt);
+LOG_CHANNEL(sys_lwcond);
+LOG_CHANNEL(sys_lwmutex);
+LOG_CHANNEL(sys_memory);
+LOG_CHANNEL(sys_mmapper);
+LOG_CHANNEL(sys_mutex);
+LOG_CHANNEL(sys_ppu_thread);
+LOG_CHANNEL(sys_process);
+LOG_CHANNEL(sys_prx);
+LOG_CHANNEL(sys_rsx);
+LOG_CHANNEL(sys_rwlock);
+LOG_CHANNEL(sys_semaphore);
+LOG_CHANNEL(sys_spu);
+LOG_CHANNEL(sys_time);
+LOG_CHANNEL(sys_timer);
+LOG_CHANNEL(sys_trace);
+LOG_CHANNEL(sys_tty);
+LOG_CHANNEL(sys_vm);
+
 extern std::string ppu_get_syscall_name(u64 code);
 
-static void null_func(PPUThread& ppu)
-{
-	LOG_TODO(HLE, "Unimplemented syscall %s -> CELL_OK", ppu_get_syscall_name(ppu.GPR[11]));
-	ppu.GPR[3] = 0;
-}
+static constexpr ppu_function_t null_func = nullptr;
 
 // UNS = Unused
 // ROOT = Root
@@ -895,17 +916,28 @@ extern void ppu_execute_syscall(PPUThread& ppu, u64 code)
 	}
 
 	// If autopause occures, check_status() will hold the thread till unpaused.
-	if (debug::autopause::pause_syscall(code) && ppu.check_status()) throw cpu_state::ret;
+	if (debug::autopause::pause_syscall(code) && ppu.check_status())
+	{
+		throw cpu_state::ret;
+	}
 
 	const auto previous_function = ppu.last_function; // TODO: use gsl::finally or something
 	
 	try
 	{
-		g_ppu_syscall_table[code](ppu);
+		if (auto func = g_ppu_syscall_table[code])
+		{
+			func(ppu);
+		}
+		else
+		{
+			LOG_TODO(HLE, "Unimplemented syscall %s -> CELL_OK", ppu_get_syscall_name(code));
+			ppu.GPR[3] = 0;
+		}
 	}
 	catch (...)
 	{
-		LOG_WARNING(PPU, "Syscall '%s' (%llu) aborted", ppu_get_syscall_name(code), code);
+		logs::PPU.format(Emu.IsStopped() ? logs::level::warning : logs::level::error, "Syscall '%s' (%llu) aborted", ppu_get_syscall_name(code), code);
 		ppu.last_function = previous_function;
 		throw;
 	}
@@ -914,4 +946,4 @@ extern void ppu_execute_syscall(PPUThread& ppu, u64 code)
 	ppu.last_function = previous_function;
 }
 
-lv2_lock_t::type::mutex_type lv2_lock_t::mutex;
+DECLARE(lv2_lock_t::mutex);

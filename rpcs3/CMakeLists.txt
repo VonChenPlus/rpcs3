@@ -25,7 +25,6 @@ elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
 	endif()
 	if(WIN32)
 		add_compile_options(-pthread)
-		add_compile_options(-D__GXX_ABI_VERSION=1009)
 	endif()
 endif()
 
@@ -40,7 +39,7 @@ if(NOT MSVC)
 		set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O1") # fix for travis gcc OoM crash. Might be fixed with the move to containers.
 	endif()
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -fexceptions")
-	add_compile_options(-msse -msse2 -mcx16 -mssse3)
+	add_compile_options(-msse -msse2 -mcx16 -mssse3 -march=native)
 else()
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:throwingNew /D _CRT_SECURE_NO_DEPRECATE=1 /D _CRT_NON_CONFORMING_SWPRINTFS=1 /D _SCL_SECURE_NO_WARNINGS=1")
 endif()
@@ -94,7 +93,7 @@ if(NOT MSVC)
 endif()
 find_package(OpenGL REQUIRED)
 find_package(OpenAL REQUIRED)
-#find_package(LLVM CONFIG) # TODO
+find_package(LLVM 3.8 CONFIG)
 
 include("${wxWidgets_USE_FILE}")
 
@@ -129,6 +128,8 @@ ${LLVM_INCLUDE_DIRS}
 # Includes 3rdparty stuff that isn't included yet
 "${RPCS3_SRC_DIR}/../3rdparty/GL"
 "${RPCS3_SRC_DIR}/../3rdparty/stblib"
+"${RPCS3_SRC_DIR}/../rsx_program_decompiler/rsx_decompiler"
+"${RPCS3_SRC_DIR}/../rsx_program_decompiler/shader_code"
 )
 if(WIN32)
 	include_directories(BEFORE "${RPCS3_SRC_DIR}/../3rdparty/XAudio2_7") # Slimmed down version of minidx9 for XAudio2_7 only
@@ -136,16 +137,14 @@ if(WIN32)
 endif()
 
 if(NOT LLVM_FOUND)
-	Message("LLVM not found! LLVM 3.6 is required. RPCS3 will be compiled without LLVM support.")
-elseif(${LLVM_PACKAGE_VERSION} VERSION_LESS "3.6" OR ${LLVM_PACKAGE_VERSION} VERSION_EQUAL "3.7" OR ${LLVM_PACKAGE_VERSION} VERSION_GREATER "3.7")
-	Message("LLVM ${LLVM_PACKAGE_VERSION} is not supported! LLVM 3.6 is required. RPCS3 will be compiled without LLVM support.")
+	Message("LLVM not found! LLVM 3.8 is required. RPCS3 will be compiled without LLVM support.")
 else()
 	add_definitions(${LLVM_DEFINITIONS})
 	add_definitions(-DLLVM_AVAILABLE)
 	if (CMAKE_BUILD_TYPE STREQUAL "Release")
-		llvm_map_components_to_libnames(LLVM_LIBS mcjit vectorize x86codegen x86disassembler)
+		llvm_map_components_to_libnames(LLVM_LIBS mcjit vectorize ipo x86codegen x86disassembler)
 	else()
-		llvm_map_components_to_libnames(LLVM_LIBS mcjit vectorize x86codegen x86disassembler mcdisassembler)
+		llvm_map_components_to_libnames(LLVM_LIBS mcjit vectorize ipo x86codegen x86disassembler mcdisassembler)
 	endif()
 endif()
 
@@ -172,7 +171,7 @@ RPCS3_SRC
 "${RPCS3_SRC_DIR}/../asmjit/src/asmjit/*.cpp"
 )
 
-if(APPLE OR WIN32 AND NOT MSVC)
+if(APPLE)
 	set (EXCLUDE_DIR "/RSX/VK/")
 	foreach (TMP_PATH ${RPCS3_SRC})
 		string (FIND ${TMP_PATH} ${EXCLUDE_DIR} EXCLUDE_DIR_FOUND)
@@ -186,19 +185,20 @@ add_executable(rpcs3 ${RPCS3_SRC})
 
 
 if(MSVC)
-	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS /NODEFAULTLIB:libc.lib /NODEFAULTLIB:libcmt.lib /NODEFAULTLIB:libcd.lib /NODEFAULTLIB:libcmtd.lib /NODEFAULTLIB:msvcrtd.lib")
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:libc.lib /NODEFAULTLIB:libcmt.lib /NODEFAULTLIB:libcd.lib /NODEFAULTLIB:libcmtd.lib /NODEFAULTLIB:msvcrtd.lib")
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS /DYNAMICBASE:NO /BASE:0x10000 /FIXED")
 endif()
 if(WIN32)
-	target_link_libraries(rpcs3  ws2_32.lib Winmm.lib)
+	target_link_libraries(rpcs3  ws2_32.lib Winmm.lib VKstatic.1 glslang OSDependent OGLCompiler SPIRV)
 	if(NOT MSVC)
-		target_link_libraries(rpcs3  ${OPENGL_LIBRARIES} ${GLEW_LIBRARY} opengl32.lib glu32.lib -lstdc++.dll -lpthread.dll)
+		target_link_libraries(rpcs3  ${OPENGL_LIBRARIES} ${GLEW_LIBRARY} opengl32.lib glu32.lib libpthread)
 	else()
-		target_link_libraries(rpcs3  dxgi.lib d2d1.lib dwrite.lib VKstatic.1 glslang OSDependent OGLCompiler SPIRV)
+		target_link_libraries(rpcs3  dxgi.lib d2d1.lib dwrite.lib)
 	endif()
 	target_link_libraries(rpcs3  avformat.lib avcodec.lib avutil.lib swresample.lib swscale.lib png16_static ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${ADDITIONAL_LIBS})
 else()
 	target_link_libraries(rpcs3  ${wxWidgets_LIBRARIES} ${OPENAL_LIBRARY} ${GLEW_LIBRARY} ${OPENGL_LIBRARIES})
-	target_link_libraries(rpcs3  libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a png16_static ${ZLIB_LIBRARIES} ${ADDITIONAL_LIBS})
+	target_link_libraries(rpcs3  libavformat.a libavcodec.a libavutil.a libswresample.a libswscale.a -ldl png16_static ${ZLIB_LIBRARIES} ${ADDITIONAL_LIBS})
 	if (NOT APPLE)
 		target_link_libraries(rpcs3  vulkan glslang OSDependent OGLCompiler SPIRV)
 	endif()
@@ -206,6 +206,8 @@ endif()
 if(LLVM_FOUND)
 	target_link_libraries(rpcs3  ${LLVM_LIBS})
 endif()
+
+target_link_libraries(rpcs3 rsx_decompiler shader_code)
 
 set_target_properties(rpcs3 PROPERTIES COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h")
 cotire(rpcs3)

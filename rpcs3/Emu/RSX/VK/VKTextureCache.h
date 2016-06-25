@@ -30,7 +30,7 @@ namespace vk
 	{
 	private:
 		std::vector<cached_texture_object> m_cache;
-
+		std::pair<u64, u64> texture_cache_range = std::make_pair(0xFFFFFFFF, 0);
 		std::vector<std::unique_ptr<vk::image_view> > m_temporary_image_view;
 
 		bool lock_memory_region(u32 start, u32 size)
@@ -120,6 +120,12 @@ namespace vk
 			obj.protected_rgn_end += obj.protected_rgn_start;
 
 			lock_memory_region(static_cast<u32>(obj.protected_rgn_start), static_cast<u32>(obj.native_rsx_size));
+			
+			if (obj.protected_rgn_start < texture_cache_range.first)
+				texture_cache_range = std::make_pair(obj.protected_rgn_start, texture_cache_range.second);
+
+			if (obj.protected_rgn_end > texture_cache_range.second)
+				texture_cache_range = std::make_pair(texture_cache_range.first, obj.protected_rgn_end);
 		}
 
 		void unlock_object(cached_texture_object &obj)
@@ -159,7 +165,7 @@ namespace vk
 			if (rtt_texture = m_rtts.get_texture_from_render_target_if_applicable(texaddr))
 			{
 				m_temporary_image_view.push_back(std::make_unique<vk::image_view>(*vk::get_current_renderer(), rtt_texture->value, VK_IMAGE_VIEW_TYPE_2D, rtt_texture->info.format,
-					vk::default_component_map(),
+					rtt_texture->native_layout,
 					vk::get_image_subresource_range(0, 0, 1, 1, VK_IMAGE_ASPECT_COLOR_BIT)));
 				return m_temporary_image_view.back().get();
 			}
@@ -254,6 +260,10 @@ namespace vk
 
 		bool invalidate_address(u32 rsx_address)
 		{
+			if (rsx_address < texture_cache_range.first ||
+				rsx_address > texture_cache_range.second)
+				return false;
+
 			for (cached_texture_object &tex : m_cache)
 			{
 				if (tex.dirty) continue;

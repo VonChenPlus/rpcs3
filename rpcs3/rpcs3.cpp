@@ -34,11 +34,10 @@
 #include "Emu/Audio/Null/NullAudioThread.h"
 #include "Emu/Audio/AL/OpenALThread.h"
 #ifdef _MSC_VER
-#include "Emu/RSX/VK/VKGSRender.h"
 #include "Emu/RSX/D3D12/D3D12GSRender.h"
 #endif
-
 #ifdef _WIN32
+#include "Emu/RSX/VK/VKGSRender.h"
 #include "Emu/Audio/XAudio2/XAudio2Thread.h"
 #include <wx/msw/wrapwin.h>
 #endif
@@ -96,7 +95,9 @@ cfg::map_entry<std::function<std::shared_ptr<GSRender>()>> g_cfg_gs_render(cfg::
 	{ "Null", PURE_EXPR(std::make_shared<NullGSRender>()) },
 	{ "OpenGL", PURE_EXPR(std::make_shared<GLGSRender>()) },
 #ifdef _MSC_VER
-	{ "DX12", PURE_EXPR(std::make_shared<D3D12GSRender>()) },
+	{ "D3D12", PURE_EXPR(std::make_shared<D3D12GSRender>()) },
+#endif
+#ifdef _WIN32
 	{ "Vulkan", PURE_EXPR(std::make_shared<VKGSRender>()) },
 #endif
 });
@@ -254,9 +255,14 @@ Rpcs3App::Rpcs3App()
 #ifdef _WIN32
 	timeBeginPeriod(1);
 
+	WSADATA wsaData;
+	WORD wVersionRequested = MAKEWORD(2, 2);
+	WSAStartup(wVersionRequested, &wsaData);
+
 	std::atexit([]
 	{
 		timeEndPeriod(1);
+		WSACleanup();
 	});
 #endif
 
