@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Utilities/Config.h"
+#include "Utilities/VirtualMemory.h"
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
@@ -7,6 +8,37 @@
 #include "PPUInterpreter.h"
 #include "PPUAnalyser.h"
 #include "PPUModule.h"
+
+#ifdef LLVM_AVAILABLE
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#endif
+#include "llvm/Support/FormattedStream.h"
+#include "llvm/IR/LLVMContext.h"
+//#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/LegacyPassManager.h"
+//#include "llvm/IR/Module.h"
+//#include "llvm/IR/Function.h"
+//#include "llvm/Analysis/Passes.h"
+//#include "llvm/Analysis/BasicAliasAnalysis.h"
+//#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/Analysis/MemoryDependenceAnalysis.h"
+//#include "llvm/Analysis/LoopInfo.h"
+//#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/Lint.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/Vectorize.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+#include "Utilities/JIT.h"
+#include "PPUTranslator.h"
+#endif
 
 enum class ppu_decoder_type
 {
@@ -25,100 +57,131 @@ cfg::map_entry<ppu_decoder_type> g_cfg_ppu_decoder(cfg::root.core, "PPU Decoder"
 const ppu_decoder<ppu_interpreter_precise> s_ppu_interpreter_precise;
 const ppu_decoder<ppu_interpreter_fast> s_ppu_interpreter_fast;
 
-struct ppu_addr_hash
+extern void ppu_execute_syscall(ppu_thread& ppu, u64 code);
+extern void ppu_execute_function(ppu_thread& ppu, u32 index);
+
+const auto s_ppu_compiled = static_cast<u32*>(memory_helper::reserve_memory(0x100000000));
+
+extern void ppu_register_function_at(u32 addr, ppu_function_t ptr)
 {
-	u32 operator()(u32 value) const
+	if (g_cfg_ppu_decoder.get() == ppu_decoder_type::llvm)
 	{
-		return value / sizeof(32);
+		memory_helper::commit_page_memory(s_ppu_compiled + addr / 4, sizeof(s_ppu_compiled[0]));
+		s_ppu_compiled[addr / 4] = (u32)(std::uintptr_t)ptr;
 	}
-};
-
-static std::unordered_map<u32, void(*)(), ppu_addr_hash> s_ppu_compiled;
-
-
-
-std::string PPUThread::get_name() const
-{
-	return fmt::format("PPU[0x%x] Thread (%s)", id, name);
 }
 
-std::string PPUThread::dump() const
+std::string ppu_thread::get_name() const
 {
-	std::string ret = "Registers:\n=========\n";
+	return fmt::format("PPU[0x%x] Thread (%s)", id, m_name);
+}
 
-	for (uint i = 0; i<32; ++i) ret += fmt::format("GPR[%d] = 0x%llx\n", i, GPR[i]);
-	for (uint i = 0; i<32; ++i) ret += fmt::format("FPR[%d] = %.6G\n", i, FPR[i]);
-	for (uint i = 0; i<32; ++i) ret += fmt::format("VR[%d] = 0x%s [%s]\n", i, VR[i].to_hex().c_str(), VR[i].to_xyzw().c_str());
-	ret += fmt::format("CR = 0x%08x\n", GetCR());
-	ret += fmt::format("LR = 0x%llx\n", LR);
-	ret += fmt::format("CTR = 0x%llx\n", CTR);
-	ret += fmt::format("XER = [CA=%u | OV=%u | SO=%u | CNT=%u]\n", u32{ CA }, u32{ OV }, u32{ SO }, u32{ XCNT });
-	//ret += fmt::format("FPSCR = 0x%x "
-	//	"[RN=%d | NI=%d | XE=%d | ZE=%d | UE=%d | OE=%d | VE=%d | "
-	//	"VXCVI=%d | VXSQRT=%d | VXSOFT=%d | FPRF=%d | "
-	//	"FI=%d | FR=%d | VXVC=%d | VXIMZ=%d | "
-	//	"VXZDZ=%d | VXIDI=%d | VXISI=%d | VXSNAN=%d | "
-	//	"XX=%d | ZX=%d | UX=%d | OX=%d | VX=%d | FEX=%d | FX=%d]\n",
-	//	FPSCR.FPSCR,
-	//	u32{ FPSCR.RN },
-	//	u32{ FPSCR.NI }, u32{ FPSCR.XE }, u32{ FPSCR.ZE }, u32{ FPSCR.UE }, u32{ FPSCR.OE }, u32{ FPSCR.VE },
-	//	u32{ FPSCR.VXCVI }, u32{ FPSCR.VXSQRT }, u32{ FPSCR.VXSOFT }, u32{ FPSCR.FPRF },
-	//	u32{ FPSCR.FI }, u32{ FPSCR.FR }, u32{ FPSCR.VXVC }, u32{ FPSCR.VXIMZ },
-	//	u32{ FPSCR.VXZDZ }, u32{ FPSCR.VXIDI }, u32{ FPSCR.VXISI }, u32{ FPSCR.VXSNAN },
-	//	u32{ FPSCR.XX }, u32{ FPSCR.ZX }, u32{ FPSCR.UX }, u32{ FPSCR.OX }, u32{ FPSCR.VX }, u32{ FPSCR.FEX }, u32{ FPSCR.FX });
+std::string ppu_thread::dump() const
+{
+	std::string ret;
+
+	ret += fmt::format("Type: %s\n", typeid(*this).name());
+	ret += fmt::format("State: 0x%08x\n", state.load());
+	ret += fmt::format("Priority: %d\n", prio);
+	
+	ret += "\nRegisters:\n=========\n";
+	for (uint i = 0; i < 32; ++i) ret += fmt::format("GPR[%d] = 0x%llx\n", i, gpr[i]);
+	for (uint i = 0; i < 32; ++i) ret += fmt::format("FPR[%d] = %.6G\n", i, fpr[i]);
+	for (uint i = 0; i < 32; ++i) ret += fmt::format("VR[%d] = %s [x: %g y: %g z: %g w: %g]\n", i, vr[i], vr[i]._f[3], vr[i]._f[2], vr[i]._f[1], vr[i]._f[0]);
+
+	if (g_cfg_ppu_decoder.get() != ppu_decoder_type::llvm)
+	{
+		ret += fmt::format("CR = 0x%08x\n", cr_pack());
+		ret += fmt::format("LR = 0x%llx\n", lr);
+		ret += fmt::format("CTR = 0x%llx\n", ctr);
+		ret += fmt::format("VRSAVE = 0x%08x\n", vrsave);
+		ret += fmt::format("XER = [CA=%u | OV=%u | SO=%u | CNT=%u]\n", xer.ca, xer.ov, xer.so, xer.cnt);
+		ret += fmt::format("VSCR = [SAT=%u | NJ=%u]\n", sat, nj);
+		ret += fmt::format("FPSCR = [FL=%u | FG=%u | FE=%u | FU=%u]\n", fpscr.fl, fpscr.fg, fpscr.fe, fpscr.fu);
+
+		ret += "\nCall stack:\n=========\n";
+		ret += fmt::format("0x%08x (0x0) called\n", cia);
+		const u32 stack_max = ::align(stack_addr + stack_size, 0x200) - 0x200;
+		for (u64 sp = vm::read64(static_cast<u32>(gpr[1])); sp >= stack_addr && sp < stack_max; sp = vm::read64(static_cast<u32>(sp)))
+		{
+			// TODO: print also function addresses
+			ret += fmt::format("> from 0x%08llx (0x0)\n", vm::read64(static_cast<u32>(sp + 16)));
+		}
+	}
 
 	return ret;
 }
 
-void PPUThread::cpu_init()
-{
-	if (!stack_addr)
-	{
-		if (!stack_size)
-		{
-			throw EXCEPTION("Invalid stack size");
-		}
-
-		stack_addr = vm::alloc(stack_size, vm::stack);
-
-		if (!stack_addr)
-		{
-			throw EXCEPTION("Out of stack memory");
-		}
-	}
-
-	GPR[1] = align(stack_addr + stack_size, 0x200) - 0x200;
-}
-
 extern thread_local std::string(*g_tls_log_prefix)();
 
-void PPUThread::cpu_task()
+void ppu_thread::cpu_task()
 {
 	//SetHostRoundingMode(FPSCR_RN_NEAR);
 
-	if (custom_task)
+	// Execute cmd_queue
+	while (ppu_cmd cmd = cmd_wait())
 	{
-		if (check_status()) return;
+		const u32 pos = cmd_queue.peek() + 1; // Additional arguments start from [pos]
+		const u32 arg = cmd.arg2<u32>(); // 32-bit arg extracted
 
-		return custom_task(*this);
-	}
-
-	if (g_cfg_ppu_decoder.get() == ppu_decoder_type::llvm)
-	{
-		const auto found = s_ppu_compiled.find(pc);
-
-		if (found != s_ppu_compiled.end())
+		switch (u32 type = cmd.arg1<u32>())
 		{
-			return found->second();
+		case ppu_cmd::opcode:
+		{
+			cmd_pop(), s_ppu_interpreter_fast.decode(arg)(*this, {arg});
+			break;
+		}
+		case ppu_cmd::set_gpr:
+		{
+			if (arg >= 32)
+			{
+				throw fmt::exception("Invalid ppu_cmd::set_gpr arg (0x%x)" HERE, arg);
+			}
+
+			gpr[arg % 32] = cmd_queue[pos].load().as<u64>();
+			cmd_pop(1);
+			break;
+		}
+		case ppu_cmd::set_args:
+		{
+			if (arg > 8)
+			{
+				throw fmt::exception("Unsupported ppu_cmd::set_args size (0x%x)" HERE, arg);
+			}
+
+			for (u32 i = 0; i < arg; i++)
+			{
+				gpr[i + 3] = cmd_queue[pos + i].load().as<u64>();
+			}
+
+			cmd_pop(arg);
+			break;
+		}
+		case ppu_cmd::lle_call:
+		{
+			const vm::ptr<u32> opd(arg < 32 ? vm::cast(gpr[arg]) : vm::cast(arg));
+			cmd_pop(), fast_call(opd[0], opd[1]);
+			break;
+		}
+		case ppu_cmd::hle_call:
+		{
+			cmd_pop(), ppu_execute_function(*this, arg);
+			break;
+		}
+		default:
+		{
+			throw fmt::exception("Unknown ppu_cmd(0x%x)" HERE, type);
+		}
 		}
 	}
+}
 
-	g_tls_log_prefix = []
+void ppu_thread::exec_task()
+{
+	if (g_cfg_ppu_decoder.get() == ppu_decoder_type::llvm)
 	{
-		const auto cpu = static_cast<PPUThread*>(get_current_cpu_thread());
-
-		return fmt::format("%s [0x%08x]", cpu->get_name(), cpu->pc);
-	};
+		return reinterpret_cast<ppu_function_t>((std::uintptr_t)s_ppu_compiled[cia / 4])(*this);
+	}
 
 	const auto base = vm::_ptr<const u8>(0);
 
@@ -135,12 +198,12 @@ void PPUThread::cpu_task()
 	{
 		if (UNLIKELY(state.load()))
 		{
-			if (check_status()) return;
+			if (check_state()) return;
 		}
 
 		// Reinitialize
 		{
-			const auto _ops = _mm_shuffle_epi8(_mm_lddqu_si128(reinterpret_cast<const __m128i*>(base + pc)), _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3));
+			const auto _ops = _mm_shuffle_epi8(_mm_lddqu_si128(reinterpret_cast<const __m128i*>(base + cia)), _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3));
 			_op.vi = _ops;
 			const v128 _i = v128::fromV(_mm_and_si128(_mm_or_si128(_mm_slli_epi32(_op.vi, 6), _mm_srli_epi32(_op.vi, 26)), _mm_set1_epi32(0x1ffff)));
 			func0 = table[_i._u32[0]];
@@ -151,14 +214,14 @@ void PPUThread::cpu_task()
 
 		while (LIKELY(func0(*this, { _op._u32[0] })))
 		{
-			if (pc += 4, LIKELY(func1(*this, { _op._u32[1] })))
+			if (cia += 4, LIKELY(func1(*this, { _op._u32[1] })))
 			{
-				if (pc += 4, LIKELY(func2(*this, { _op._u32[2] })))
+				if (cia += 4, LIKELY(func2(*this, { _op._u32[2] })))
 				{
-					pc += 4;
+					cia += 4;
 					func0 = func3;
 
-					const auto _ops = _mm_shuffle_epi8(_mm_lddqu_si128(reinterpret_cast<const __m128i*>(base + pc + 4)), _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3));
+					const auto _ops = _mm_shuffle_epi8(_mm_lddqu_si128(reinterpret_cast<const __m128i*>(base + cia + 4)), _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3));
 					_op.vi = _mm_alignr_epi8(_ops, _op.vi, 12);
 					const v128 _i = v128::fromV(_mm_and_si128(_mm_or_si128(_mm_slli_epi32(_op.vi, 6), _mm_srli_epi32(_op.vi, 26)), _mm_set1_epi32(0x1ffff)));
 					func1 = table[_i._u32[1]];
@@ -180,87 +243,7 @@ void PPUThread::cpu_task()
 
 constexpr auto stop_state = make_bitset(cpu_state::stop, cpu_state::exit, cpu_state::suspend);
 
-atomic_t<u32> g_ppu_core[2]{};
-
-bool PPUThread::handle_interrupt()
-{
-	// Reschedule and wake up a new thread, possibly this one as well.
-	return false;
-
-	// Check virtual core allocation
-	if (g_ppu_core[0] != id && g_ppu_core[1] != id)
-	{
-		auto cpu0 = idm::get<PPUThread>(g_ppu_core[0]);
-		auto cpu1 = idm::get<PPUThread>(g_ppu_core[1]);
-
-		if (cpu0 && cpu1)
-		{
-			if (cpu1->prio > cpu0->prio)
-			{
-				cpu0 = std::move(cpu1);
-			}
-
-			// Preempt thread with the lowest priority
-			if (prio < cpu0->prio)
-			{
-				cpu0->state += cpu_state::interrupt;
-			}
-		}
-		else
-		{
-			// Try to obtain a virtual core in optimistic way
-			if (g_ppu_core[0].compare_and_swap_test(0, id) || g_ppu_core[1].compare_and_swap_test(0, id))
-			{
-				state -= cpu_state::interrupt;
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	// Select appropriate thread
-	u32 top_prio = -1;
-	u32 selected = -1;
-
-	idm::select<PPUThread>([&](u32 id, PPUThread& ppu)
-	{
-		// Exclude suspended and low-priority threads
-		if (!ppu.state.test(stop_state) && ppu.prio < top_prio /*&& (!ppu.is_sleep() || ppu.state & cpu_state::signal)*/)
-		{
-			top_prio = ppu.prio;
-			selected = id;
-		}
-	});
-
-	// If current thread selected
-	if (selected == id)
-	{
-		state -= cpu_state::interrupt;
-		VERIFY(g_ppu_core[0] == id || g_ppu_core[1] == id);
-		return true;
-	}
-
-	// If another thread selected
-	const auto thread = idm::get<PPUThread>(selected);
-
-	// Lend virtual core to another thread
-	if (thread && thread->state.test_and_reset(cpu_state::interrupt))
-	{
-		g_ppu_core[0].compare_and_swap(id, thread->id);
-		g_ppu_core[1].compare_and_swap(id, thread->id);
-		(*thread)->lock_notify();
-	}
-	else
-	{
-		g_ppu_core[0].compare_and_swap(id, 0);
-		g_ppu_core[1].compare_and_swap(id, 0);
-	}
-
-	return false;
-}
-
-PPUThread::~PPUThread()
+ppu_thread::~ppu_thread()
 {
 	if (stack_addr)
 	{
@@ -268,113 +251,163 @@ PPUThread::~PPUThread()
 	}
 }
 
-PPUThread::PPUThread(const std::string& name)
-	: cpu_thread(cpu_type::ppu, name)
+ppu_thread::ppu_thread(const std::string& name, u32 prio, u32 stack)
+	: cpu_thread(cpu_type::ppu)
+	, prio(prio)
+	, stack_size(std::max<u32>(stack, 0x4000))
+	, stack_addr(vm::alloc(stack_size, vm::stack))
+	, m_name(name)
 {
+	if (!stack_addr)
+	{
+		throw fmt::exception("Out of stack memory (size=0x%x)" HERE, stack_size);
+	}
+
+	gpr[1] = ::align(stack_addr + stack_size, 0x200) - 0x200;
 }
 
-be_t<u64>* PPUThread::get_stack_arg(s32 i, u64 align)
+void ppu_thread::cmd_push(ppu_cmd cmd)
+{
+	// Reserve queue space
+	const u32 pos = cmd_queue.push_begin();
+
+	// Write single command
+	cmd_queue[pos] = cmd;
+}
+
+void ppu_thread::cmd_list(std::initializer_list<ppu_cmd> list)
+{
+	// Reserve queue space
+	const u32 pos = cmd_queue.push_begin(static_cast<u32>(list.size()));
+
+	// Write command tail in relaxed manner
+	for (u32 i = 1; i < list.size(); i++)
+	{
+		cmd_queue[pos + i].raw() = list.begin()[i];
+	}
+
+	// Write command head after all
+	cmd_queue[pos] = *list.begin();
+}
+
+void ppu_thread::cmd_pop(u32 count)
+{
+	// Get current position
+	const u32 pos = cmd_queue.peek();
+
+	// Clean command buffer for command tail
+	for (u32 i = 1; i <= count; i++)
+	{
+		cmd_queue[pos + i].raw() = ppu_cmd{};
+	}
+
+	// Free
+	cmd_queue.pop_end(count + 1);
+}
+
+ppu_cmd ppu_thread::cmd_wait()
+{
+	std::unique_lock<named_thread> lock(*this, std::defer_lock);
+
+	while (true)
+	{
+		if (UNLIKELY(state.load()))
+		{
+			if (lock) lock.unlock();
+
+			if (check_state()) // check_status() requires unlocked mutex
+			{
+				return ppu_cmd{};
+			}
+		}
+
+		// Lightweight queue doesn't care about mutex state
+		if (ppu_cmd result = cmd_queue[cmd_queue.peek()].exchange(ppu_cmd{}))
+		{
+			return result;
+		}
+
+		if (!lock)
+		{
+			lock.lock();
+			continue;
+		}
+
+		thread_ctrl::wait(); // Waiting requires locked mutex
+	}
+}
+
+be_t<u64>* ppu_thread::get_stack_arg(s32 i, u64 align)
 {
 	if (align != 1 && align != 2 && align != 4 && align != 8 && align != 16) throw fmt::exception("Unsupported alignment: 0x%llx" HERE, align);
-	return vm::_ptr<u64>(vm::cast((GPR[1] + 0x30 + 0x8 * (i - 1)) & (0 - align), HERE));
+	return vm::_ptr<u64>(vm::cast((gpr[1] + 0x30 + 0x8 * (i - 1)) & (0 - align), HERE));
 }
 
-void PPUThread::fast_call(u32 addr, u32 rtoc)
+void ppu_thread::fast_call(u32 addr, u32 rtoc)
 {
-	auto old_PC = pc;
-	auto old_stack = GPR[1];
-	auto old_rtoc = GPR[2];
-	auto old_LR = LR;
-	auto old_task = std::move(custom_task);
+	const auto old_pc = cia;
+	const auto old_stack = gpr[1];
+	const auto old_rtoc = gpr[2];
+	const auto old_lr = lr;
+	const auto old_func = last_function;
+	const auto old_fmt = g_tls_log_prefix;
 
-	pc = addr;
-	GPR[2] = rtoc;
-	LR = Emu.GetCPUThreadStop();
-	custom_task = nullptr;
+	cia = addr;
+	gpr[2] = rtoc;
+	lr = Emu.GetCPUThreadStop();
+	last_function = nullptr;
+
+	g_tls_log_prefix = []
+	{
+		const auto ppu = static_cast<ppu_thread*>(get_current_cpu_thread());
+
+		return fmt::format("%s [0x%08x]", ppu->get_name(), ppu->cia);
+	};
 
 	try
 	{
-		cpu_task();
+		exec_task();
+
+		if (gpr[1] != old_stack && !state.test(cpu_state::ret) && !state.test(cpu_state::exit)) // gpr[1] shouldn't change
+		{
+			throw fmt::exception("Stack inconsistency (addr=0x%x, rtoc=0x%x, SP=0x%llx, old=0x%llx)", addr, rtoc, gpr[1], old_stack);
+		}
 	}
 	catch (cpu_state _s)
 	{
 		state += _s;
 		if (_s != cpu_state::ret) throw;
 	}
+	catch (EmulationStopped)
+	{
+		if (last_function) LOG_WARNING(PPU, "'%s' aborted", last_function);
+		last_function = old_func;
+		throw;
+	}
+	catch (...)
+	{
+		if (last_function) LOG_ERROR(PPU, "'%s' aborted", last_function);
+		last_function = old_func;
+		throw;
+	}
 
 	state -= cpu_state::ret;
 
-	pc = old_PC;
-
-	if (GPR[1] != old_stack) // GPR[1] shouldn't change
-	{
-		throw EXCEPTION("Stack inconsistency (addr=0x%x, rtoc=0x%x, SP=0x%llx, old=0x%llx)", addr, rtoc, GPR[1], old_stack);
-	}
-
-	GPR[2] = old_rtoc;
-	LR = old_LR;
-	custom_task = std::move(old_task);
-
-	//if (custom_task)
-	//{
-	//	state += cpu_state::interrupt;
-	//	handle_interrupt();
-	//}
+	cia = old_pc;
+	gpr[1] = old_stack;
+	gpr[2] = old_rtoc;
+	lr = old_lr;
+	last_function = old_func;
+	g_tls_log_prefix = old_fmt;
 }
-
-#ifdef LLVM_AVAILABLE
-#ifdef _MSC_VER
-#pragma warning(push, 0)
-#endif
-//#include "llvm/Support/TargetRegistry.h"
-#include "llvm/Support/TargetSelect.h"
-//#include "llvm/Support/Host.h"
-#include "llvm/Support/FormattedStream.h"
-//#include "llvm/Support/Debug.h"
-//#include "llvm/CodeGen/CommandFlags.h"
-//#include "llvm/CodeGen/Passes.h"
-#include "llvm/IR/LLVMContext.h"
-//#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Verifier.h"
-//#include "llvm/IR/InstIterator.h"
-#include "llvm/IR/LegacyPassManager.h"
-//#include "llvm/IR/Module.h"
-//#include "llvm/IR/Function.h"
-//#include "llvm/Analysis/Passes.h"
-//#include "llvm/Analysis/TargetTransformInfo.h"
-#include "llvm/Analysis/MemoryDependenceAnalysis.h"
-//#include "llvm/Analysis/LoopInfo.h"
-//#include "llvm/Analysis/ScalarEvolution.h"
-#include "llvm/Analysis/Lint.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/IPO.h"
-#include "llvm/Transforms/Vectorize.h"
-
-#include "llvm/ExecutionEngine/ExecutionEngine.h"
-#include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
-#include "llvm/ExecutionEngine/JITEventListener.h"
-//#include "llvm/Object/ObjectFile.h"
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-
-#include "PPUTranslator.h"
-
-#ifdef _WIN32
-#include <Windows.h>
-#else
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/types.h>
-#endif
 
 const ppu_decoder<ppu_itype> s_ppu_itype;
 
 extern u64 get_timebased_time();
-extern void ppu_execute_syscall(PPUThread& ppu, u64 code);
-extern void ppu_execute_function(PPUThread& ppu, u32 index);
+extern ppu_function_t ppu_get_syscall(u64 code);
+extern std::string ppu_get_syscall_name(u64 code);
+extern ppu_function_t ppu_get_function(u32 index);
+extern std::string ppu_get_module_function_name(u32 index);
 
 extern __m128 sse_exp2_ps(__m128 A);
 extern __m128 sse_log2_ps(__m128 A);
@@ -386,486 +419,132 @@ extern __m128i sse_cellbe_lvrx(u64 addr);
 extern void sse_cellbe_stvlx(u64 addr, __m128i a);
 extern void sse_cellbe_stvrx(u64 addr, __m128i a);
 
-struct Listener final : llvm::JITEventListener
+[[noreturn]] static void ppu_trap(u64 addr)
 {
-	virtual void NotifyObjectEmitted(const llvm::object::ObjectFile& obj, const llvm::RuntimeDyld::LoadedObjectInfo& inf) override
-	{
-		const llvm::StringRef elf = obj.getData();
-		fs::file(fs::get_config_dir() + "LLVM.obj", fs::rewrite)
-			.write(elf.data(), elf.size());
-	}
-};
+	throw fmt::exception("Trap! (0x%llx)", addr);
+}
 
-static Listener s_listener;
-
-// Memory size: 512 MB
-static const u64 s_memory_size = 0x20000000;
-
-// Try to reserve a portion of virtual memory in the first 2 GB address space, if possible.
-static void* const s_memory = []() -> void*
+[[noreturn]] static void ppu_unreachable(u64 addr)
 {
-#ifdef _WIN32
-	for (u64 addr = 0x1000000; addr <= 0x60000000; addr += 0x1000000)
-	{
-		if (VirtualAlloc((void*)addr, s_memory_size, MEM_RESERVE, PAGE_NOACCESS))
-		{
-			return (void*)addr;
-		}
-	}
+	throw fmt::exception("Unreachable! (0x%llx)", addr);
+}
 
-	return VirtualAlloc(NULL, s_memory_size, MEM_RESERVE, PAGE_NOACCESS);
+static void ppu_trace(u64 addr)
+{
+	LOG_NOTICE(PPU, "Trace: 0x%llx", addr);
+}
+
+static u32 ppu_lwarx(u32 addr)
+{
+	be_t<u32> reg_value;
+	vm::reservation_acquire(&reg_value, addr, sizeof(reg_value));
+	return reg_value;
+}
+
+static u64 ppu_ldarx(u32 addr)
+{
+	be_t<u64> reg_value;
+	vm::reservation_acquire(&reg_value, addr, sizeof(reg_value));
+	return reg_value;
+}
+
+static bool ppu_stwcx(u32 addr, u32 reg_value)
+{
+	const be_t<u32> data = reg_value;
+	return vm::reservation_update(addr, &data, sizeof(data));
+}
+
+static bool ppu_stdcx(u32 addr, u64 reg_value)
+{
+	const be_t<u64> data = reg_value;
+	return vm::reservation_update(addr, &data, sizeof(data));
+}
+
+static bool adde_carry(u64 a, u64 b, bool c)
+{
+#ifdef _MSC_VER
+	return _addcarry_u64(c, a, b, nullptr) != 0;
 #else
-	return ::mmap((void*)0x10000000, s_memory_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+	bool result;
+	__asm__("addb $0xff, %[c] \n adcq %[a], %[b] \n setb %[result]" : [a] "+&r" (a), [b] "+&r" (b), [c] "+&r" (c), [result] "=r" (result));
+	return result;
 #endif
-}();
+}
 
-// EH frames
-static u8* s_unwind_info;
-static u64 s_unwind_size;
-
-#ifdef _WIN32
-// Custom .pdata section replacement
-static std::vector<RUNTIME_FUNCTION> s_unwind;
-#endif
-
-struct MemoryManager final : llvm::RTDyldMemoryManager
+extern void ppu_initialize(const std::string& name, const std::vector<ppu_function>& funcs)
 {
-	static PPUThread* context(u64 addr)
+	if (g_cfg_ppu_decoder.get() != ppu_decoder_type::llvm || funcs.empty())
 	{
-		//trace(addr);
-		return static_cast<PPUThread*>(get_current_cpu_thread());
-	}
-
-	[[noreturn]] static void trap(u64 addr)
-	{
-		LOG_ERROR(PPU, "Trap! (0x%llx)", addr);
-		throw fmt::exception("Trap! (0x%llx)", addr);
-	}
-
-	static void trace(u64 addr)
-	{
-		LOG_NOTICE(PPU, "Trace: 0x%llx", addr);
-	}
-
-	static void hack(u32 index)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		ppu_execute_function(ppu, index);
-		if (ppu.state.load() && ppu.check_status()) throw cpu_state::ret; // Temporarily
-	}
-
-	static void syscall(u64 code)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		ppu_execute_syscall(ppu, code);
-		if (ppu.state.load() && ppu.check_status()) throw cpu_state::ret; // Temporarily
-	}
-
-	static u32 tbl()
-	{
-		return (u32)get_timebased_time();
-	}
-
-	static void call(u32 addr)
-	{
-		const auto found = s_ppu_compiled.find(addr);
-
-		if (found != s_ppu_compiled.end())
+		if (!Emu.GetCPUThreadStop())
 		{
-			return found->second();
+			auto ppu_thr_stop_data = vm::ptr<u32>::make(vm::alloc(2 * 4, vm::main));
+			Emu.SetCPUThreadStop(ppu_thr_stop_data.addr());
+			ppu_thr_stop_data[0] = ppu_instructions::HACK(1);
+			ppu_thr_stop_data[1] = ppu_instructions::BLR();
 		}
-
-		const auto op = vm::read32(addr).value();
-		const auto itype = s_ppu_itype.decode(op);
-
-		// Allow HLE callbacks without compiling them
-		if (itype == ppu_itype::HACK && vm::read32(addr + 4) == ppu_instructions::BLR())
-		{
-			return hack(op & 0x3ffffff);
-		}
-
-		trap(addr);
+		
+		return;
 	}
 
-	static __m128 sse_rcp_ps(__m128 A)
+	std::unordered_map<std::string, std::uintptr_t> link_table
 	{
-		return _mm_rcp_ps(A);
-	}
-
-	static __m128 sse_rsqrt_ps(__m128 A)
-	{
-		return _mm_rsqrt_ps(A);
-	}
-
-	static float sse_rcp_ss(float A)
-	{
-		_mm_store_ss(&A, _mm_rcp_ss(_mm_load_ss(&A)));
-		return A;
-	}
-
-	static float sse_rsqrt_ss(float A)
-	{
-		_mm_store_ss(&A, _mm_rsqrt_ss(_mm_load_ss(&A)));
-		return A;
-	}
-
-	static u32 lwarx(u32 addr)
-	{
-		be_t<u32> reg_value;
-		vm::reservation_acquire(&reg_value, addr, sizeof(reg_value));
-		return reg_value;
-	}
-
-	static u64 ldarx(u32 addr)
-	{
-		be_t<u64> reg_value;
-		vm::reservation_acquire(&reg_value, addr, sizeof(reg_value));
-		return reg_value;
-	}
-
-	static bool stwcx(u32 addr, u32 reg_value)
-	{
-		const be_t<u32> data = reg_value;
-		return vm::reservation_update(addr, &data, sizeof(data));
-	}
-
-	static bool stdcx(u32 addr, u64 reg_value)
-	{
-		const be_t<u64> data = reg_value;
-		return vm::reservation_update(addr, &data, sizeof(data));
-	}
-
-	static bool adde_carry(u64 a, u64 b, bool c)
-	{
-		return _addcarry_u64(c, a, b, nullptr) != 0;
-	}
-
-	// Interpreter call for simple vector instructions
-	static __m128i vec3op(decltype(&ppu_interpreter::UNK) func, __m128i _a, __m128i _b, __m128i _c)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		ppu.VR[21].vi = _a;
-		ppu.VR[22].vi = _b;
-		ppu.VR[23].vi = _c;
-
-		ppu_opcode_t op{};
-		op.vd = 20;
-		op.va = 21;
-		op.vb = 22;
-		op.vc = 23;
-		func(ppu, op);
-
-		return ppu.VR[20].vi;
-	}
-
-	// Interpreter call for simple vector instructions with immediate
-	static __m128i veciop(decltype(&ppu_interpreter::UNK) func, ppu_opcode_t op, __m128i _b)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		ppu.VR[22].vi = _b;
-
-		op.vd = 20;
-		op.vb = 22; 
-		func(ppu, op);
-
-		return ppu.VR[20].vi;
-	}
-
-	// Interpreter call for FP instructions
-	static f64 fpop(decltype(&ppu_interpreter::UNK) func, f64 _a, f64 _b, f64 _c)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		ppu.FPR[21] = _a;
-		ppu.FPR[22] = _b;
-		ppu.FPR[23] = _c;
-
-		ppu_opcode_t op{};
-		op.frd = 20;
-		op.fra = 21;
-		op.frb = 22;
-		op.frc = 23;
-		func(ppu, op);
-
-		return ppu.FPR[20];
-	}
-
-	// Interpreter call for GPR instructions writing result to RA
-	static u64 aimmop(decltype(&ppu_interpreter::UNK) func, ppu_opcode_t op, u64 _s)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		const u64 a = ppu.GPR[op.ra];
-		const u64 s = ppu.GPR[op.rs];
-		ppu.GPR[op.rs] = _s;
-
-		func(ppu, op);
-
-		const u64 r = ppu.GPR[op.ra];
-		ppu.GPR[op.ra] = a;
-		ppu.GPR[op.rs] = s;
-		return r;
-	}
-
-	// Interpreter call for GPR instructions writing result to RA
-	static u64 aimmbop(decltype(&ppu_interpreter::UNK) func, ppu_opcode_t op, u64 _s, u64 _b)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		const u64 a = ppu.GPR[op.ra];
-		const u64 s = ppu.GPR[op.rs];
-		const u64 b = ppu.GPR[op.rb];
-		ppu.GPR[op.rs] = _s;
-		ppu.GPR[op.rb] = _b;
-
-		func(ppu, op);
-
-		const u64 r = ppu.GPR[op.ra];
-		ppu.GPR[op.ra] = a;
-		ppu.GPR[op.rs] = s;
-		ppu.GPR[op.rb] = b;
-		return r;
-	}
-
-	// Interpreter call for GPR instructions writing result to RA (destructive)
-	static u64 aaimmop(decltype(&ppu_interpreter::UNK) func, ppu_opcode_t op, u64 _s, u64 _a)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		const u64 s = ppu.GPR[op.rs];
-		const u64 a = ppu.GPR[op.ra];
-		ppu.GPR[op.rs] = _s;
-		ppu.GPR[op.ra] = _a;
-
-		func(ppu, op);
-
-		const u64 r = ppu.GPR[op.ra];
-		ppu.GPR[op.rs] = s;
-		ppu.GPR[op.ra] = a;
-		return r;
-	}
-
-	static u64 immaop(decltype(&ppu_interpreter::UNK) func, ppu_opcode_t op, u64 _a)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		const u64 a = ppu.GPR[op.ra];
-		const u64 d = ppu.GPR[op.rd];
-		ppu.GPR[op.ra] = _a;
-
-		func(ppu, op);
-
-		const u64 r = ppu.GPR[op.rd];
-		ppu.GPR[op.ra] = a;
-		ppu.GPR[op.rd] = d;
-		return r;
-	}
-
-	static u64 immabop(decltype(&ppu_interpreter::UNK) func, ppu_opcode_t op, u64 _a, u64 _b)
-	{
-		PPUThread& ppu = static_cast<PPUThread&>(*get_current_cpu_thread());
-		const u64 a = ppu.GPR[op.ra];
-		const u64 b = ppu.GPR[op.rb];
-		const u64 d = ppu.GPR[op.rd];
-		ppu.GPR[op.ra] = _a;
-		ppu.GPR[op.rb] = _b;
-
-		func(ppu, op);
-
-		const u64 r = ppu.GPR[op.rd];
-		ppu.GPR[op.ra] = a;
-		ppu.GPR[op.rb] = b;
-		ppu.GPR[op.rd] = d;
-		return r;
-	}
-
-	// No operation on specific u64 value (silly optimization barrier)
-	static u64 nop64(u64 value)
-	{
-		return value;
-	}
-
-	std::unordered_map<std::string, u64> table
-	{
-		{ "__memory", (u64)vm::base(0) },
-		{ "__context", (u64)&context },
-		{ "__trap", (u64)&trap },
-		{ "__trace", (u64)&trace },
-		{ "__hlecall", (u64)&hack },
-		{ "__syscall", (u64)&syscall },
-		{ "__get_tbl", (u64)&tbl },
-		{ "__call", (u64)&call },
-		{ "__lwarx", (u64)&lwarx },
-		{ "__ldarx", (u64)&ldarx },
-		{ "__stwcx", (u64)&stwcx },
-		{ "__stdcx", (u64)&stdcx },
+		{ "__mptr", (u64)&vm::g_base_addr },
+		{ "__cptr", (u64)&s_ppu_compiled },
+		{ "__trap", (u64)&ppu_trap },
+		{ "__end", (u64)&ppu_unreachable },
+		{ "__trace", (u64)&ppu_trace },
+		{ "__hlecall", (u64)&ppu_execute_function },
+		{ "__syscall", (u64)&ppu_execute_syscall },
+		{ "__get_tbl", (u64)&get_timebased_time },
+		{ "__lwarx", (u64)&ppu_lwarx },
+		{ "__ldarx", (u64)&ppu_ldarx },
+		{ "__stwcx", (u64)&ppu_stwcx },
+		{ "__stdcx", (u64)&ppu_stdcx },
 		{ "__adde_get_ca", (u64)&adde_carry },
 		{ "__vexptefp", (u64)&sse_exp2_ps },
 		{ "__vlogefp", (u64)&sse_log2_ps },
 		{ "__vperm", (u64)&sse_altivec_vperm },
-		{ "__vrefp", (u64)&sse_rcp_ps },
-		{ "__vrsqrtefp", (u64)&sse_rsqrt_ps },
-		{ "__vec3op", (u64)&vec3op },
-		{ "__veciop", (u64)&veciop },
-		{ "__aimmop", (u64)&aimmop },
-		{ "__aimmbop", (u64)&aimmbop },
-		{ "__aaimmop", (u64)&aaimmop },
-		{ "__immaop", (u64)&immaop },
-		{ "__immabop", (u64)&immabop },
-		{ "__fpop", (u64)&fpop },
-		{ "__nop64", (u64)&nop64 },
 		{ "__lvsl", (u64)&sse_altivec_lvsl },
 		{ "__lvsr", (u64)&sse_altivec_lvsr },
 		{ "__lvlx", (u64)&sse_cellbe_lvlx },
 		{ "__lvrx", (u64)&sse_cellbe_lvrx },
 		{ "__stvlx", (u64)&sse_cellbe_stvlx },
 		{ "__stvrx", (u64)&sse_cellbe_stvrx },
-		{ "__fre", (u64)&sse_rcp_ss },
-		{ "__frsqrte", (u64)&sse_rsqrt_ss },
 	};
 
-	virtual u64 getSymbolAddress(const std::string& name) override
-	{
-		if (u64 addr = RTDyldMemoryManager::getSymbolAddress(name))
-		{
-			LOG_ERROR(GENERAL, "LLVM: Linkage requested %s -> 0x%016llx", name, addr);
-			return addr;
-		}
-
-		const auto found = table.find(name);
-
-		if (found != table.end())
-		{
-			return found->second;
-		}
-
-		LOG_FATAL(GENERAL, "LLVM: Linkage failed for %s", name);
-		return (u64)trap;
-	}
-
-	virtual u8* allocateCodeSection(std::uintptr_t size, uint align, uint sec_id, llvm::StringRef sec_name) override
-	{
-		// Simple allocation (TODO)
-		const auto ptr = m_next; m_next = (void*)::align((u64)m_next + size, 4096);
-
-#ifdef _WIN32
-		if (!VirtualAlloc(ptr, size, MEM_COMMIT, PAGE_EXECUTE_READWRITE))
-#else
-		if (::mprotect(ptr, size, PROT_READ | PROT_WRITE | PROT_EXEC))
-#endif
-		{
-			LOG_FATAL(GENERAL, "LLVM: Failed to allocate code section '%s'", sec_name.data());
-			return nullptr;
-		}
-
-		LOG_SUCCESS(GENERAL, "LLVM: Code section '%s' allocated -> 0x%p", sec_name.data(), ptr);
-		return (u8*)ptr;
-	}
-
-	virtual u8* allocateDataSection(std::uintptr_t size, uint align, uint sec_id, llvm::StringRef sec_name, bool is_ro) override
-	{
-		// Simple allocation (TODO)
-		const auto ptr = m_next; m_next = (void*)::align((u64)m_next + size, 4096);
-
-#ifdef _WIN32
-		if (!VirtualAlloc(ptr, size, MEM_COMMIT, PAGE_READWRITE))
-#else
-		if (::mprotect(ptr, size, PROT_READ | PROT_WRITE))
-#endif
-		{
-			LOG_FATAL(GENERAL, "LLVM: Failed to allocate data section '%s'", sec_name.data());
-			return nullptr;
-		}
-		
-		LOG_SUCCESS(GENERAL, "LLVM: Data section '%s' allocated -> 0x%p", sec_name.data(), ptr);
-		return (u8*)ptr;
-	}
-
-	virtual bool finalizeMemory(std::string* = nullptr) override
-	{
-		// TODO: make sections read-only when necessary
-		return false;
-	}
-
-	virtual void registerEHFrames(u8* addr, u64 load_addr, std::size_t size) override
-	{
-		s_unwind_info = addr;
-		s_unwind_size = size;
-
-		return RTDyldMemoryManager::registerEHFrames(addr, load_addr, size);
-	}
-
-	virtual void deregisterEHFrames(u8* addr, u64 load_addr, std::size_t size) override
-	{
-		LOG_ERROR(GENERAL, "deregisterEHFrames() called"); // Not expected
-
-		return RTDyldMemoryManager::deregisterEHFrames(addr, load_addr, size);
-	}
-
-	~MemoryManager()
-	{
-#ifdef _WIN32
-		if (!RtlDeleteFunctionTable(s_unwind.data()))
-		{
-			LOG_FATAL(GENERAL, "RtlDeleteFunctionTable(addr=0x%p) failed! Error %u", s_unwind_info, GetLastError());
-		}
-
-		if (!VirtualFree(s_memory, 0, MEM_DECOMMIT))
-		{
-			LOG_FATAL(GENERAL, "VirtualFree(0x%p) failed! Error %u", s_memory, GetLastError());
-		}
-#else
-		if (::mprotect(s_memory, s_memory_size, PROT_NONE))
-		{
-			LOG_FATAL(GENERAL, "mprotect(0x%p) failed! Error %d", s_memory, errno);
-		}
-
-		// TODO: unregister EH frames if necessary
-#endif
-	}
-
-private:
-	void* m_next = s_memory;
-};
-
-llvm::LLVMContext g_context;
-
-extern void ppu_initialize(const std::string& name, const std::vector<std::pair<u32, u32>>& funcs, u32 entry)
-{
-	if (!s_memory)
-	{
-		throw std::runtime_error("LLVM: Memory not allocated, report to the developers." HERE);
-	}
-
-	if (g_cfg_ppu_decoder.get() != ppu_decoder_type::llvm || funcs.empty())
-	{
-		return;
-	}
-
+#ifdef LLVM_AVAILABLE
 	using namespace llvm;
 
-	InitializeNativeTarget();
-	InitializeNativeTargetAsmPrinter();
-	LLVMLinkInMCJIT();
-
-	// Initialization
-	const auto _pi8 = Type::getInt8PtrTy(g_context);
-	const auto _void = Type::getVoidTy(g_context);
-	const auto _func = FunctionType::get(Type::getVoidTy(g_context), false);
-
 	// Create LLVM module
-	std::unique_ptr<Module> module = std::make_unique<Module>(name, g_context);
+	std::unique_ptr<Module> module = std::make_unique<Module>(name, g_llvm_ctx);
 
 	// Initialize target
 	module->setTargetTriple(Triple::normalize(sys::getProcessTriple()));
 	
 	// Initialize translator
-	std::unique_ptr<PPUTranslator> translator = std::make_unique<PPUTranslator>(g_context, module.get(), 0, entry);
+	std::unique_ptr<PPUTranslator> translator = std::make_unique<PPUTranslator>(g_llvm_ctx, module.get(), 0);
+
+	// Define some types
+	const auto _void = Type::getVoidTy(g_llvm_ctx);
+	const auto _func = FunctionType::get(_void, { translator->GetContextType()->getPointerTo() }, false);
 
 	// Initialize function list
 	for (const auto& info : funcs)
 	{
-		if (info.second)
+		if (info.size)
 		{
-			translator->AddFunction(info.first, cast<Function>(module->getOrInsertFunction(fmt::format("__sub_%x", info.first), _func)));
+			const auto f = cast<Function>(module->getOrInsertFunction(fmt::format("__0x%x", info.addr), _func));
+			f->addAttribute(1, Attribute::NoAlias);
+			translator->AddFunction(info.addr, f);
 		}
-
-		translator->AddBlockInfo(info.first);
+		
+		for (const auto& b : info.blocks)
+		{
+			if (b.second)
+			{
+				translator->AddBlockInfo(b.first);
+			}
+		}
 	}
 
 	legacy::FunctionPassManager pm(module.get());
@@ -877,51 +556,108 @@ extern void ppu_initialize(const std::string& name, const std::vector<std::pair<
 	pm.add(createTailCallEliminationPass());
 	pm.add(createReassociatePass());
 	pm.add(createInstructionCombiningPass());
-	//pm.add(new DominatorTreeWrapperPass());
-	//pm.add(createInstructionCombiningPass());
+	//pm.add(createBasicAAWrapperPass());
 	//pm.add(new MemoryDependenceAnalysis());
+	pm.add(createLICMPass());
+	pm.add(createLoopInstSimplifyPass());
+	pm.add(createGVNPass());
 	pm.add(createDeadStoreEliminationPass());
-	//pm.add(createGVNPass());
-	//pm.add(createBBVectorizePass());
-	//pm.add(new LoopInfo());
-	//pm.add(new ScalarEvolution());
-
 	pm.add(createSCCPPass());
-	//pm.addPass(new SyscallAnalysisPass()); // Requires constant propagation
 	pm.add(createInstructionCombiningPass());
+	pm.add(createInstructionSimplifierPass());
 	pm.add(createAggressiveDCEPass());
 	pm.add(createCFGSimplificationPass());
 	//pm.add(createLintPass()); // Check
-	
+
 	// Translate functions
 	for (const auto& info : funcs)
 	{
-		if (info.second)
+		if (info.size)
 		{
-			pm.run(*translator->TranslateToIR(info.first, info.first + info.second, vm::_ptr<u32>(info.first)));
+			const auto func = translator->TranslateToIR(info, vm::_ptr<u32>(info.addr));
+
+			// Run optimization passes
+			pm.run(*func);
+
+			const auto _syscall = module->getFunction("__syscall");
+			const auto _hlecall = module->getFunction("__hlecall");
+
+			for (auto i = inst_begin(*func), end = inst_end(*func); i != end;)
+			{
+				const auto inst = &*i++;
+
+				if (const auto ci = dyn_cast<CallInst>(inst))
+				{
+					const auto cif = ci->getCalledFunction();
+					const auto op1 = ci->getNumArgOperands() > 1 ? ci->getArgOperand(1) : nullptr;
+
+					if (cif == _syscall && op1 && isa<ConstantInt>(op1))
+					{
+						// Try to determine syscall using the value from r11 (requires constant propagation)
+						const u64 index = cast<ConstantInt>(op1)->getZExtValue();
+
+						if (const auto ptr = ppu_get_syscall(index))
+						{
+							const auto n = ppu_get_syscall_name(index);
+							const auto f = cast<Function>(module->getOrInsertFunction(n, _func));
+							link_table.emplace(n, reinterpret_cast<std::uintptr_t>(ptr));
+
+							// Call the syscall directly
+							ReplaceInstWithInst(ci, CallInst::Create(f, {ci->getArgOperand(0)}));
+						}
+					}
+
+					if (cif == _hlecall && op1 && isa<ConstantInt>(op1))
+					{
+						const u32 index = static_cast<u32>(cast<ConstantInt>(op1)->getZExtValue());
+
+						if (const auto ptr = ppu_get_function(index))
+						{
+							const auto n = ppu_get_module_function_name(index);
+							const auto f = cast<Function>(module->getOrInsertFunction(n, _func));
+							link_table.emplace(n, reinterpret_cast<std::uintptr_t>(ptr));
+
+							// Call the function directly
+							ReplaceInstWithInst(ci, CallInst::Create(f, {ci->getArgOperand(0)}));
+						}
+					}
+
+					continue;
+				}
+
+				if (const auto li = dyn_cast<LoadInst>(inst))
+				{
+					// TODO: more careful check
+					if (li->getNumUses() == 0)
+					{
+						// Remove unreferenced volatile loads
+						li->eraseFromParent();
+					}
+
+					continue;
+				}
+
+				if (const auto si = dyn_cast<StoreInst>(inst))
+				{
+					// TODO: more careful check
+					if (isa<UndefValue>(si->getOperand(0)) && si->getParent() == &func->getEntryBlock())
+					{
+						// Remove undef volatile stores
+						si->eraseFromParent();
+					}
+
+					continue;
+				}
+			}
 		}
 	}
-
-	//static auto s_current = &PPUTranslator::UNK;
-
-	//for (const auto& info : s_test)
-	//{
-	//	const u64 pseudo_addr = (u64)&info.first + INT64_MIN;
-
-	//	s_current = info.second;
-	//	const auto func = translator->TranslateToIR(pseudo_addr, pseudo_addr, nullptr, [](PPUTranslator* _this)
-	//	{
-	//		(_this->*s_current)(op);
-	//		_this->ReturnFromFunction();
-	//	});
-
-	//	pm.run(*func);
-	//}
 
 	legacy::PassManager mpm;
 
 	// Remove unused functions, structs, global variables, etc
 	mpm.add(createStripDeadPrototypesPass());
+	//mpm.add(createFunctionInliningPass());
+	mpm.add(createDeadInstEliminationPass());
 	mpm.run(*module);
 
 	std::string result;
@@ -944,98 +680,28 @@ extern void ppu_initialize(const std::string& name, const std::vector<std::pair<
 
 	Module* module_ptr = module.get();
 
-	std::shared_ptr<ExecutionEngine> engine(EngineBuilder(std::move(module))
-		.setErrorStr(&result)
-		.setMCJITMemoryManager(std::make_unique<MemoryManager>())
-		.setOptLevel(llvm::CodeGenOpt::Aggressive)
-		.setRelocationModel(Reloc::PIC_)
-		.setCodeModel((u64)s_memory <= 0x60000000 ? CodeModel::Medium : CodeModel::Large)
-		.setMCPU(sys::getHostCPUName())
-		.create());
+	const auto jit = fxm::make<jit_compiler>(std::move(module), std::move(link_table));
 
-	if (!engine)
+	if (!jit)
 	{
-		throw fmt::exception("LLVM: Failed to create ExecutionEngine: %s", result);
+		LOG_FATAL(PPU, "LLVM: Multiple modules are not yet supported");
+		return;
 	}
 
-	engine->setProcessAllSections(true);
-	//engine->setVerifyModules(true);
-	engine->RegisterJITEventListener(&s_listener);
-	engine->finalizeObject();
+	memory_helper::free_reserved_memory(s_ppu_compiled, 0x100000000); // TODO
 
-	s_ppu_compiled.clear();
-
-	// Get function addresses
+	// Get and install function addresses
 	for (const auto& info : funcs)
 	{
-		if (info.second)
+		if (info.size)
 		{
-			const std::uintptr_t link = engine->getFunctionAddress(fmt::format("__sub_%x", info.first));
-			s_ppu_compiled.emplace(info.first, (void(*)())link);
+			const std::uintptr_t link = jit->get(fmt::format("__0x%x", info.addr));
+			ppu_register_function_at(info.addr, (ppu_function_t)link);
 
-			LOG_NOTICE(PPU, "** Function __sub_%x -> 0x%llx (addr=0x%x, size=0x%x)", info.first, link, info.first, info.second);
+			LOG_NOTICE(PPU, "** Function __0x%x -> 0x%llx (size=0x%x, toc=0x%x, attr %#x)", info.addr, link, info.size, info.toc, info.attr);
 		}
 	}
 
-	// Delete IR to lower memory consumption
-	for (auto& func : module_ptr->functions())
-	{
-		func.deleteBody();
-	}
-
-#ifdef _WIN32
-	// Register .xdata UNWIND_INFO (.pdata section is empty for some reason)
-	std::set<u64> func_set;
-
-	for (const auto& pair : s_ppu_compiled)
-	{
-		// Get addresses
-		func_set.emplace((u64)pair.second);
-	}
-
-	func_set.emplace(::align(*--func_set.end() + 4096, 4096));
-
-	const u64 base = (u64)s_memory;
-	const u8* bits = s_unwind_info;
-
-	s_unwind.clear();
-	s_unwind.reserve(s_ppu_compiled.size());
-
-	for (auto it = func_set.begin(), end = --func_set.end(); it != end; it++)
-	{
-		const u64 addr = *it;
-		const u64 next = *func_set.upper_bound(addr);
-
-		// Generate RUNTIME_FUNCTION record
-		RUNTIME_FUNCTION uw;
-		uw.BeginAddress = static_cast<u32>(addr - base);
-		uw.EndAddress   = static_cast<u32>(next - base);
-		uw.UnwindData   = static_cast<u32>((u64)bits - base);
-		s_unwind.emplace_back(uw);
-
-		// Parse .xdata record
-		VERIFY(*bits++ == 1); // Version and flags
-		bits++; // Size of prolog
-		const u8 count = *bits++; // Count of unwind codes
-		bits++; // Frame Reg + Off
-		bits += ::align(count, 2) * sizeof(u16); // UNWIND_CODE array
-		while (!*bits && bits < s_unwind_info + s_unwind_size) bits++; // Skip strange zero padding (???)
-	}
-
-	VERIFY(bits == s_unwind_info + s_unwind_size);
-	VERIFY(RtlAddFunctionTable(s_unwind.data(), (DWORD)s_unwind.size(), base));
-	LOG_SUCCESS(GENERAL, "LLVM: UNWIND_INFO registered (addr=0x%p, size=0x%llx)", s_unwind_info, s_unwind_size);
-#endif
-
-	fxm::import<ExecutionEngine>(WRAP_EXPR(engine));
-
 	LOG_SUCCESS(PPU, "LLVM: Compilation finished (%s)", sys::getHostCPUName().data());
-}
-
-#else
-
-extern void ppu_initialize(const std::string& name, const std::vector<std::pair<u32, u32>>& funcs, u32 entry)
-{
-}
-
 #endif
+}

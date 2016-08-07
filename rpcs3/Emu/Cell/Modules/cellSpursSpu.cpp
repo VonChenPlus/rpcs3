@@ -17,8 +17,6 @@
 
 extern logs::channel cellSpurs;
 
-extern std::mutex& get_current_thread_mutex();
-
 //----------------------------------------------------------------------------
 // Function prototypes
 //----------------------------------------------------------------------------
@@ -774,7 +772,7 @@ void spursSysServiceIdleHandler(SPUThread& spu, SpursKernelContext* ctxt)
 {
 	bool shouldExit;
 
-	std::unique_lock<std::mutex> lock(get_current_thread_mutex(), std::defer_lock);
+	std::unique_lock<named_thread> lock(spu, std::defer_lock);
 
 	while (true)
 	{
@@ -864,8 +862,8 @@ void spursSysServiceIdleHandler(SPUThread& spu, SpursKernelContext* ctxt)
 		{
 			// The system service blocks by making a reservation and waiting on the lock line reservation lost event.
 			CHECK_EMU_STATUS;
-			if (!lock) lock.lock();
-			get_current_thread_cv().wait_for(lock, 1ms);
+			if (!lock) { lock.lock(); continue; }
+			thread_ctrl::wait_for(1000);
 			continue;
 		}
 
@@ -2022,15 +2020,15 @@ s32 spursTasksetLoadElf(SPUThread& spu, u32* entryPoint, u32* lowestLoadAddr, u6
 		return CELL_SPURS_TASK_ERROR_INVAL;
 	}
 
-	const spu_exec_loader loader(fs::file(vm::base(vm::cast(elfAddr, HERE)), u32(0 - elfAddr)));
+	const spu_exec_object obj(fs::file(vm::base(vm::cast(elfAddr, HERE)), u32(0 - elfAddr)));
 
-	if (loader != elf_error::ok)
+	if (obj != elf_error::ok)
 	{
 		return CELL_SPURS_TASK_ERROR_NOEXEC;
 	}
 
 	u32 _lowestLoadAddr = CELL_SPURS_TASK_BOTTOM;
-	for (const auto& prog : loader.progs)
+	for (const auto& prog : obj.progs)
 	{
 		if (prog.p_paddr >= CELL_SPURS_TASK_BOTTOM)
 		{
@@ -2051,7 +2049,7 @@ s32 spursTasksetLoadElf(SPUThread& spu, u32* entryPoint, u32* lowestLoadAddr, u6
 		}
 	}
 
-	for (const auto& prog : loader.progs)
+	for (const auto& prog : obj.progs)
 	{
 		if (prog.p_paddr >= CELL_SPURS_TASK_BOTTOM) // ???
 		{
@@ -2067,7 +2065,7 @@ s32 spursTasksetLoadElf(SPUThread& spu, u32* entryPoint, u32* lowestLoadAddr, u6
 		}
 	}
 
-	*entryPoint = loader.header.e_entry;
+	*entryPoint = obj.header.e_entry;
 	if (lowestLoadAddr) *lowestLoadAddr = _lowestLoadAddr;
 
 	return CELL_OK;

@@ -25,7 +25,7 @@ __Windows__
 * [Python 3.3+](https://www.python.org/downloads/) (required; add to PATH)
 
 __Linux__
-* GCC 5.1+ or Clang 3.5.0+
+* GCC 5.1+ or Clang 3.5.0+ ([not GCC 6.1](https://github.com/RPCS3/rpcs3/issues/1691))
 * Debian & Ubuntu: `sudo apt-get install cmake build-essential libopenal-dev libwxgtk3.0-dev libglew-dev zlib1g-dev libedit-dev libvulkan-dev`
 * Arch: `sudo pacman -S glew openal wxgtk cmake llvm`
 
@@ -48,5 +48,13 @@ If you want to build with LLVM, then LLVM 3.8 is required.
 If you are on OSX and want to build with llvm don't forget to add `-DLLVM_DIR=...` (or wherever llvm brew was installed) to cmake invocation.
 When using GDB, configure it to ignore SIGSEGV signal (`handle SIGSEGV nostop noprint`).
 
+##### CMake Build Options (Linux & Mac OSX)
+
+- ```-DUSE_SYSTEM_LIBPNG=ON/OFF``` (default = *OFF*) </br>
+Build against the shared libpng instead of using the builtin one. libpng 1.6+ highly recommended. Try this option if you get version conflict errors or only see black game icons.
+
+- ```-DUSE_SYSTEM_FFMPEG=ON/OFF``` (default = *OFF*) </br>
+Build against the shared ffmpeg libraries instead of using the builtin patched version. Try this if the builtin version breaks the OpenGL renderer for you.
+
 ### Support
-* [Donate by PayPal](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=MPJ3S9XQXCE3G)
+* [Donate by PayPal](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=nekotekina%40gmail%2ecom&lc=US&item_name=RPCS3&currency_code=USD&bn=PP%2dDonationsBF%3abtn_donate_LG%2egif%3aNonHosted)

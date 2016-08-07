@@ -15,6 +15,59 @@ logs::channel sceLibKernel("sceLibKernel", logs::level::notice);
 
 extern u64 get_system_time();
 
+arm_tls_manager::arm_tls_manager(u32 vaddr, u32 fsize, u32 vsize)
+	: vaddr(vaddr)
+	, fsize(fsize)
+	, vsize(vsize)
+	, start(vsize ? vm::alloc(vsize * ::size32(m_map), vm::main) : 0)
+{
+}
+
+u32 arm_tls_manager::alloc()
+{
+	if (!vsize)
+	{
+		return 0;
+	}
+
+	for (u32 i = 0; i < m_map.size(); i++)
+	{
+		if (!m_map[i] && m_map[i].exchange(true) == false)
+		{
+			const u32 addr = start + i * vsize; // Get TLS address
+			std::memcpy(vm::base(addr), vm::base(vaddr), fsize); // Initialize from TLS image
+			std::memset(vm::base(addr + fsize), 0, vsize - fsize); // Fill the rest with zeros
+			return addr;
+		}
+	}
+
+	sceLibKernel.error("arm_tls_manager::alloc(): out of TLS memory (max=%zu)", m_map.size());
+	return 0;
+}
+
+void arm_tls_manager::free(u32 addr)
+{
+	if (!addr)
+	{
+		return;
+	}
+
+	// Calculate TLS index
+	const u32 i = (addr - start) / vsize;
+
+	if (addr < start || i >= m_map.size() || (addr - start) % vsize)
+	{
+		sceLibKernel.error("arm_tls_manager::free(0x%x): invalid address", addr);
+		return;
+	}
+
+	if (m_map[i].exchange(false) == false)
+	{
+		sceLibKernel.error("arm_tls_manager::free(0x%x): deallocation failed", addr);
+		return;
+	}
+}
+
 s32 sceKernelAllocMemBlock(vm::cptr<char> name, s32 type, u32 vsize, vm::ptr<SceKernelAllocMemBlockOpt> pOpt)
 {
 	throw EXCEPTION("");
@@ -46,6 +99,7 @@ arm_error_code sceKernelCreateThread(vm::cptr<char> pName, vm::ptr<SceKernelThre
 	thread->prio = initPriority;
 	thread->stack_size = stackSize;
 	thread->cpu_init();
+	thread->TLS = fxm::get<arm_tls_manager>()->alloc();
 
 	return NOT_AN_ERROR(thread->id);
 }
@@ -75,9 +129,7 @@ arm_error_code sceKernelStartThread(s32 threadId, u32 argSize, vm::cptr<void> pA
 	// set SceKernelThreadEntry function arguments
 	thread->GPR[0] = argSize;
 	thread->GPR[1] = pos;
-
-	thread->state -= cpu_state::stop;
-	(*thread)->lock_notify();
+	thread->run();
 	return SCE_OK;
 }
 
@@ -109,6 +161,7 @@ arm_error_code sceKernelDeleteThread(s32 threadId)
 	//	return SCE_KERNEL_ERROR_NOT_DORMANT;
 	//}
 
+	fxm::get<arm_tls_manager>()->free(thread->TLS);
 	idm::remove<ARMv7Thread>(threadId);
 	return SCE_OK;
 }
@@ -120,6 +173,7 @@ arm_error_code sceKernelExitDeleteThread(ARMv7Thread& cpu, s32 exitStatus)
 	//cpu.state += cpu_state::stop;
 
 	// Delete current thread; exit status is stored in r0
+	fxm::get<arm_tls_manager>()->free(cpu.TLS);
 	idm::remove<ARMv7Thread>(cpu.id);
 
 	return SCE_OK;
@@ -252,7 +306,7 @@ arm_error_code sceKernelWaitThreadEnd(s32 threadId, vm::ptr<s32> pExitStatus, vm
 	{
 	}
 
-	(*thread)->join();
+	thread->join();
 
 	if (pExitStatus)
 	{
@@ -424,23 +478,20 @@ struct psp2_event_flag final
 	// Returns true if the command has been completed immediately. Its status is unknown otherwise.
 	bool exec(task type, u32 arg)
 	{
-		// Acquire position in the queue
+		// Allocate position in the queue
 		const u32 push_pos = m_workload.push_begin();
 
 		// Make the command
 		cmd_t cmd{type, arg};
 
+		// Get queue head
 		u32 pos = m_workload.peek();
 
-		// Check optimistic case
+		// Check non-optimistic case
 		if (UNLIKELY(pos != push_pos))
 		{
-			// Write the command
-			m_workload[push_pos] = cmd;
-			pos = m_workload.peek(); // ???
-
-			// Try to acquire a command
-			cmd = m_workload[pos].exchange({task::null});
+			// Try to acquire first command in the queue, *then* write current command
+			m_workload[push_pos] = std::exchange(cmd, m_workload[pos].exchange({task::null}));
 		}
 
 		while (true)
@@ -467,7 +518,7 @@ struct psp2_event_flag final
 				idm::get<ARMv7Thread>(cmd.arg, [&](u32, ARMv7Thread& cpu)
 				{
 					cpu.state += cpu_state::signal;
-					cpu->lock_notify();
+					cpu.lock_notify();
 				});
 
 				break;
@@ -813,9 +864,9 @@ arm_error_code sceKernelWaitEventFlag(ARMv7Thread& cpu, s32 evfId, u32 bitPatter
 		return SCE_OK;
 	}
 
-	cpu_thread_lock entry(cpu);
+	thread_lock entry(cpu);
 
-	if (!thread_ctrl::wait(timeout, WRAP_EXPR(cpu.state.test_and_reset(cpu_state::signal))))
+	if (!thread_ctrl::wait_for(timeout, WRAP_EXPR(cpu.state.test_and_reset(cpu_state::signal))))
 	{
 		// Timeout cleanup
 		cpu.owner = nullptr;

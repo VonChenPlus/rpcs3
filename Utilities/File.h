@@ -439,8 +439,14 @@ namespace fs
 	// Get executable directory
 	const std::string& get_executable_dir();
 
+	// Get data/cache directory for specified prefix and suffix
+	std::string get_data_dir(const std::string& prefix, const std::string& location, const std::string& suffix);
+
+	// Get data/cache directory for specified prefix and path (suffix will be filename)
+	std::string get_data_dir(const std::string& prefix, const std::string& path);
+
 	// Delete directory and all its contents recursively
-	void remove_all(const std::string& path);
+	void remove_all(const std::string& path, bool remove_root = true);
 
 	// Get size of all files recursively
 	u64 get_dir_size(const std::string& path);

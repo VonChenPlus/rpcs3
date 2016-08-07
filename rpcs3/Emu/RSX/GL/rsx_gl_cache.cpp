@@ -3,6 +3,161 @@
 #include "gl_helpers.h"
 #include "../GCM.h"
 
+static void insert_texture_fetch_function(std::string &dst, const rsx::decompiled_shader &shader, const rsx::program_state &state)
+{
+	if (shader.textures.empty())
+	{
+		return;
+	}
+
+	dst += "vec4 texture_fetch(int index, vec4 coord)\n{\n";
+	dst += "\tswitch (index)\n\t{\n";
+
+	for (auto &texture : shader.textures)
+	{
+		dst += "\tcase " + std::to_string(texture.id) + ": return ";
+
+		switch (state.textures[texture.id])
+		{
+		case rsx::texture_target::none: dst += "vec4(0.0)"; break;
+		case rsx::texture_target::_1: dst += "texture(" + texture.name + ", coord.x)"; break;
+		case rsx::texture_target::_2: dst += "texture(" + texture.name + ", coord.xy)"; break;
+
+		case rsx::texture_target::cube:
+		case rsx::texture_target::_3: dst += "texture(" + texture.name + ", coord.xyz)"; break;
+		}
+
+		dst += ";\n";
+	}
+
+	dst += "\t}\n";
+	dst += "}\n";
+}
+
+static void insert_texture_bias_fetch_function(std::string &dst, const rsx::decompiled_shader &shader, const rsx::program_state &state)
+{
+	if (shader.textures.empty())
+	{
+		return;
+	}
+
+	dst += "vec4 texture_bias_fetch(int index, vec4 coord, float bias)\n{\n";
+	dst += "\tswitch (index)\n\t{\n";
+
+	for (auto &texture : shader.textures)
+	{
+		dst += "\tcase " + std::to_string(texture.id) + ": return ";
+
+		switch (state.textures[texture.id])
+		{
+		case rsx::texture_target::none: dst += "vec4(0.0)"; break;
+		case rsx::texture_target::_1: dst += "texture(" + texture.name + ", coord.x, bias)"; break;
+		case rsx::texture_target::_2: dst += "texture(" + texture.name + ", coord.xy, bias)"; break;
+
+		case rsx::texture_target::cube:
+		case rsx::texture_target::_3: dst += "texture(" + texture.name + ", coord.xyz, bias)"; break;
+		}
+
+		dst += ";\n";
+	}
+
+	dst += "\t}\n";
+	dst += "}\n";
+}
+
+static void insert_texture_grad_fetch_function(std::string &dst, const rsx::decompiled_shader &shader, const rsx::program_state &state)
+{
+	if (shader.textures.empty())
+	{
+		return;
+	}
+
+	dst += "vec4 texture_grad_fetch(int index, vec4 coord, vec4 dPdx, vec4 dPdy)\n{\n";
+	dst += "\tswitch (index)\n\t{\n";
+
+	for (auto &texture : shader.textures)
+	{
+		dst += "\tcase " + std::to_string(texture.id) + ": return ";
+
+		switch (state.textures[texture.id])
+		{
+		case rsx::texture_target::none: dst += "vec4(0.0)"; break;
+		case rsx::texture_target::_1: dst += "textureGrad(" + texture.name + ", coord.x, dPdx.x, dPdy.x)"; break;
+		case rsx::texture_target::_2: dst += "textureGrad(" + texture.name + ", coord.xy, dPdx.xy, dPdy.xy)"; break;
+
+		case rsx::texture_target::cube:
+		case rsx::texture_target::_3: dst += "textureGrad(" + texture.name + ", coord.xyz, dPdx.xyz, dPdy.xyz)"; break;
+		}
+
+		dst += ";\n";
+	}
+
+	dst += "\t}\n";
+	dst += "}\n";
+}
+
+static void insert_texture_lod_fetch_function(std::string &dst, const rsx::decompiled_shader &shader, const rsx::program_state &state)
+{
+	if (shader.textures.empty())
+	{
+		return;
+	}
+
+	dst += "vec4 texture_lod_fetch(int index, vec4 coord, float lod)\n{\n";
+	dst += "\tswitch (index)\n\t{\n";
+
+	for (auto &texture : shader.textures)
+	{
+		dst += "\tcase " + std::to_string(texture.id) + ": return ";
+
+		switch (state.textures[texture.id])
+		{
+		case rsx::texture_target::none: dst += "vec4(0.0)"; break;
+		case rsx::texture_target::_1: dst += "textureLod(" + texture.name + ", coord.x, lod)"; break;
+		case rsx::texture_target::_2: dst += "textureLod(" + texture.name + ", coord.xy, lod)"; break;
+
+		case rsx::texture_target::cube:
+		case rsx::texture_target::_3: dst += "textureLod(" + texture.name + ", coord.xyz, lod)"; break;
+		}
+
+		dst += ";\n";
+	}
+
+	dst += "\t}\n";
+	dst += "}\n";
+}
+
+static void insert_texture_proj_fetch_function(std::string &dst, const rsx::decompiled_shader &shader, const rsx::program_state &state)
+{
+	if (shader.textures.empty())
+	{
+		return;
+	}
+
+	dst += "vec4 texture_proj_fetch(int index, vec4 coord, float bias)\n{\n";
+	dst += "\tswitch (index)\n\t{\n";
+
+	for (auto &texture : shader.textures)
+	{
+		dst += "\tcase " + std::to_string(texture.id) + ": return ";
+
+		switch (state.textures[texture.id])
+		{
+		case rsx::texture_target::cube:
+		case rsx::texture_target::none: dst += "vec4(0.0)"; break;
+		case rsx::texture_target::_1: dst += "textureProj(" + texture.name + ", coord.xy, bias)"; break;
+		case rsx::texture_target::_2: dst += "textureProj(" + texture.name + ", coord.xyz, bias)"; break;
+		case rsx::texture_target::_3: dst += "textureProj(" + texture.name + ", coord, bias)"; break;
+		}
+
+		dst += ";\n";
+	}
+
+	dst += "\t}\n";
+	dst += "}\n";
+}
+
+
 rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, rsx::program_state state)
 {
 	rsx::complete_shader result;
@@ -15,6 +170,15 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 			"\tmat4 viewport_matrix;\n"
 			"\tmat4 window_matrix;\n"
 			"\tmat4 normalize_matrix;\n"
+			"};\n";
+	}
+	else if (shader.raw->type == rsx::program_type::fragment)
+	{
+		result.code += "layout(std140, binding = 3) uniform StateParameters\n{\n"
+			"\tfloat fog_param0;\n"
+			"\tfloat fog_param1;\n"
+			"\tuint alpha_test;\n"
+			"\tfloat alpha_ref;\n"
 			"};\n";
 	}
 
@@ -72,12 +236,6 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 
 	result.code += "\n";
 
-	for (const rsx::texture_info& texture : shader.textures)
-	{
-		result.code += "uniform vec4 " + texture.name + "_cm = vec4(1.0);\n";
-		result.code += "uniform sampler2D " + texture.name + ";\n";
-	}
-
 	std::string prepare;
 	std::string finalize;
 	int location = 1;
@@ -85,19 +243,40 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 	switch (shader.raw->type)
 	{
 	case rsx::program_type::fragment:
+		for (const rsx::texture_info& texture : shader.textures)
+		{
+			result.code += "uniform vec4 " + texture.name + "_cm = vec4(1.0);\n";
+			rsx::texture_target target = state.textures[texture.id];
+
+			result.code += "uniform sampler";
+
+			switch (target)
+			{
+			default:
+			case rsx::texture_target::_1: result.code += "1D"; break;
+			case rsx::texture_target::_2: result.code += "2D"; break;
+			case rsx::texture_target::_3: result.code += "3D"; break;
+			case rsx::texture_target::cube: result.code += "Cube"; break;
+			}
+			result.code += " " + texture.name + ";\n";
+		}
+
+		insert_texture_fetch_function(result.code, shader, state);
+		insert_texture_bias_fetch_function(result.code, shader, state);
+		insert_texture_grad_fetch_function(result.code, shader, state);
+		insert_texture_lod_fetch_function(result.code, shader, state);
+		insert_texture_proj_fetch_function(result.code, shader, state);
+
+		result.code += "\n";
 		result.code += "layout(location = 0) out vec4 ocol;\n";
 
 		if (state.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS)
 		{
-			if (0)
+			if (shader.temporary_registers.find({ "r0" }) != shader.temporary_registers.end())
 			{
-				finalize += "\tocol = vec4(1.0, 0.0, 1.0, 1.0);\n";
-			}
-			else
-			{
+				//Some shaders only write to gl_FragDepth and ignore color output
 				finalize += "\tocol = r0;\n";
 			}
-
 			if (shader.temporary_registers.find({ "r2" }) != shader.temporary_registers.end())
 			{
 				result.code += "layout(location = 1) out vec4 ocol1;\n";
@@ -116,7 +295,11 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 		}
 		else
 		{
-			finalize += "\tocol = h0;\n";
+			if (shader.temporary_registers.find({ "h0" }) != shader.temporary_registers.end())
+			{
+				//Some shaders only write to gl_FragDepth and ignore color output
+				finalize += "\tocol = h0;\n";
+			}
 
 			if (shader.temporary_registers.find({ "h4" }) != shader.temporary_registers.end())
 			{
@@ -137,20 +320,51 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 
 		if (state.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
 		{
-			if (state.ctrl & CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS)
+			//@NOTE: Checking for CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS to determine whether to read 16f or 32f depth is incorrect (always seems to be r1.z)
+			//Resogun shows this behaviour as well as Naruto UNS2
+			//See also D3D12FragmentProgramDecompiler.cpp
+
+			if (shader.temporary_registers.find({ "r1" }) != shader.temporary_registers.end())
 			{
-				if (shader.temporary_registers.find({ "r1" }) != shader.temporary_registers.end())
-				{
-					finalize += "\tgl_FragDepth = r1.z;\n";
-				}
+				finalize += "\tgl_FragDepth = r1.z;\n";
 			}
-			else
+		}
+
+		{
+			if (~state.output_attributes & CELL_GCM_ATTRIB_OUTPUT_MASK_FOG)
 			{
-				if (shader.temporary_registers.find({ "h2" }) != shader.temporary_registers.end())
-				{
-					finalize += "\tgl_FragDepth = h2.z;\n";
-				}
+				result.code += "vec4 fog = vec4(0.0);\n";
 			}
+
+			result.code += "vec4 fogc;\n";
+
+			std::string body;
+			switch ((rsx::fog_mode)state.fog_mode)
+			{
+			case rsx::fog_mode::linear:
+				body = "fog_param1 * fog.x + (fog_param0 - 1.0), fog_param1 * fog.x + (fog_param0 - 1.0)";
+				break;
+			case rsx::fog_mode::exponential:
+				body = "11.084 * (fog_param1 * fog.x + fog_param0 - 1.5), exp(11.084 * (fog_param1 * fog.x + fog_param0 - 1.5))";
+				break;
+			case rsx::fog_mode::exponential2:
+				body = "4.709 * (fog_param1 * fog.x + fog_param0 - 1.5), exp(-pow(4.709 * (fog_param1 * fog.x + fog_param0 - 1.5), 2.0))";
+				break;
+			case rsx::fog_mode::linear_abs:
+				body = "fog_param1 * abs(fog.x) + (fog_param0 - 1.0), fog_param1 * abs(fog.x) + (fog_param0 - 1.0)";
+				break;
+			case rsx::fog_mode::exponential_abs:
+				body = "11.084 * (fog_param1 * abs(fog.x) + fog_param0 - 1.5), exp(11.084 * (fog_param1 * abs(fog.x) + fog_param0 - 1.5))";
+				break;
+			case rsx::fog_mode::exponential2_abs:
+				body = "4.709 * (fog_param1 * abs(fog.x) + fog_param0 - 1.5), exp(-pow(4.709 * (fog_param1 * abs(fog.x) + fog_param0 - 1.5), 2.0))";
+				break;
+
+			default:
+				body = "0.0, 0.0";
+			}
+
+			prepare += "\tfogc = clamp(vec4(" + body + ", 0.0, 0.0), 0.0, 1.0);\n";
 		}
 
 		{
@@ -240,24 +454,94 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 				result.code += "in vec4 " + rsx::vertex_program::output_attrib_names[index] + ";\n";
 			}
 		}
+
+		{
+			auto make_comparsion_test = [](rsx::comparison_function compare_func, const std::string &test, const std::string &a, const std::string &b) -> std::string
+			{
+				if (compare_func == rsx::comparison_function::always)
+				{
+					return{};
+				}
+
+				if (compare_func == rsx::comparison_function::never)
+				{
+					return "\tdiscard;\n";
+				}
+
+				std::string compare;
+
+				switch (compare_func)
+				{
+				case rsx::comparison_function::equal:
+					compare = "==";
+					break;
+
+				case rsx::comparison_function::not_equal:
+					compare = "!=";
+					break;
+
+				case rsx::comparison_function::less_or_equal:
+					compare = "<=";
+					break;
+
+				case rsx::comparison_function::less:
+					compare = "<";
+					break;
+
+				case rsx::comparison_function::greater:
+					compare = ">";
+					break;
+
+				case rsx::comparison_function::greater_or_equal:
+					compare = ">=";
+					break;
+				}
+
+				return "\tif (" + test + "!(" + a + " " + compare + " " + b + ")) discard;\n";
+			};
+
+			for (u8 index = 0; index < 16; ++index)
+			{
+				if (state.textures_alpha_kill[index])
+				{
+					std::string index_string = std::to_string(index);
+					std::string fetch_texture = "texture_fetch(" + index_string + ", tex" + index_string + " * ftexture" + index_string + "_cm).a";
+					finalize += make_comparsion_test((rsx::comparison_function)state.textures_zfunc[index], "", "0", fetch_texture);
+				}
+			}
+
+			finalize += make_comparsion_test((rsx::comparison_function)state.alpha_func, "alpha_test != 0 && ", "ocol.a", "alpha_ref");
+		}
 		break;
 
 	case rsx::program_type::vertex:
+		for (const rsx::texture_info& texture : shader.textures)
+		{
+			result.code += "uniform vec4 " + texture.name + "_cm = vec4(1.0);\n";
+
+			rsx::texture_target target = state.vertex_textures[texture.id];
+
+			result.code += "uniform sampler";
+
+			switch (target)
+			{
+			default:
+			case rsx::texture_target::_1: result.code += "1D"; break;
+			case rsx::texture_target::_2: result.code += "2D"; break;
+			case rsx::texture_target::_3: result.code += "3D"; break;
+			case rsx::texture_target::cube: result.code += "Cube"; break;
+			}
+			result.code += " " + texture.name + ";\n";
+		}
+
+		insert_texture_lod_fetch_function(result.code, shader, state);
 
 		result.code += "out vec4 wpos;\n";
-		
-		// TODO
-		if (0)
-		{
-			finalize += "\tgl_Position = o0;\n";
-		}
-		else
-		{
-			finalize +=
-				"	wpos = window_matrix * viewport_matrix * vec4(o0.xyz, 1.0);\n"
-				"	gl_Position = normalize_matrix * vec4(wpos.xyz, 1.0);\n"
-				"	gl_Position.w = o0.w;\n";
-		}
+
+		finalize +=
+			"	wpos = window_matrix * viewport_matrix * vec4(o0.xyz, 1.0);\n"
+			"	gl_Position = normalize_matrix * vec4(wpos.xyz, 1.0);\n"
+			"	gl_Position.w = o0.w;\n";
 
 		{
 			std::string code_end;
@@ -266,9 +550,6 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 			{
 				if (shader.input_attributes & (1 << index))
 				{
-					// result.code += "in vec4 " + rsx::vertex_program::input_attrib_names[index] + ";\n";
-
-					// TODO: use actual information about vertex inputs
 					const std::string &attrib_name = rsx::vertex_program::input_attrib_names[index];
 
 					result.code += "uniform ";
@@ -290,11 +571,22 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 
 					std::string vertex_id;
 
-					if (state.is_array & (1 << index))
+					if (state.frequency[index] == 1)
+					{
+						if (state.divider_op & (1 << index))
+						{
+							vertex_id += "0";
+						}
+						else
+						{
+							vertex_id += "gl_VertexID";
+						}
+					}
+					else
 					{
 						vertex_id = "gl_VertexID";
 
-						if (state.frequency[index] > 1)
+						if (state.frequency[index])
 						{
 							if (state.divider_op & (1 << index))
 							{
@@ -308,10 +600,6 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 							vertex_id += std::to_string(state.frequency[index]);
 						}
 					}
-					else
-					{
-						vertex_id = "0";
-					}
 
 					prepare += '\t' + attrib_name + " = texelFetch(" + attrib_name + "_buffer, " + vertex_id + ");\n";
 				}
@@ -321,6 +609,12 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 		}
 
 		{
+			if (state.output_attributes & CELL_GCM_ATTRIB_OUTPUT_MASK_FOG)
+			{
+				result.code += "out vec4 fog;\n";
+				finalize += "\tfog = o5.xxxx;\n";
+			}
+
 			auto map_register = [&](int to, int from)
 			{
 				if (shader.output_attributes & (1 << from))
@@ -332,11 +626,11 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 				{
 					result.code += "out vec4 " + rsx::vertex_program::output_attrib_names[to] + ";\n";
 
-					if ((1 << to) == CELL_GCM_ATTRIB_OUTPUT_MASK_BACKDIFFUSE && shader.output_attributes & (1 << 1))
+					if (to == CELL_GCM_ATTRIB_OUTPUT_BACKDIFFUSE && shader.output_attributes & (1 << 1))
 					{
 						finalize += "\t" + rsx::vertex_program::output_attrib_names[to] + " = o1;\n";
 					}
-					else if ((1 << to) == CELL_GCM_ATTRIB_OUTPUT_MASK_BACKSPECULAR && shader.output_attributes & (1 << 2))
+					else if (to == CELL_GCM_ATTRIB_OUTPUT_BACKSPECULAR && shader.output_attributes & (1 << 2))
 					{
 						finalize += "\t" + rsx::vertex_program::output_attrib_names[to] + " = o2;\n";
 					}
@@ -347,19 +641,19 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 				}
 			};
 
-			map_register(0, 1);
-			map_register(1, 2);
-			map_register(2, 3);
-			map_register(3, 4);
-			map_register(14, 7);
-			map_register(15, 8);
-			map_register(16, 9);
-			map_register(17, 10);
-			map_register(18, 11);
-			map_register(19, 12);
-			map_register(20, 13);
-			map_register(21, 14);
-			map_register(12, 15);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_FRONTDIFFUSE, 1);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_FRONTSPECULAR, 2);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_BACKDIFFUSE, 3);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_BACKSPECULAR, 4);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX0, 7);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX1, 8);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX2, 9);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX3, 10);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX4, 11);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX5, 12);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX6, 13);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX7, 14);
+			map_register(CELL_GCM_ATTRIB_OUTPUT_TEX8, 15);
 
 			if (shader.output_attributes & (1 << 5))
 			{
@@ -407,11 +701,6 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 					finalize += "\tgl_ClipDistance[5] = uc_m5 * o6.w;\n";
 				}
 			}
-
-			if (state.output_attributes & CELL_GCM_ATTRIB_OUTPUT_MASK_FOG)
-			{
-				//TODO
-			}
 		}
 		break;
 
@@ -422,7 +711,7 @@ rsx::complete_shader glsl_complete_shader(const rsx::decompiled_shader &shader, 
 	result.code += "\n";
 	result.code += shader.code;
 
-	result.code += "void main()\n{\n" + prepare + "\t" + shader.entry_function + "();\n" + finalize + "}";
+	result.code += "void main()\n{\n" + prepare + "\n\t" + shader.entry_function + "();\n\n" + finalize + "}";
 	return result;
 }
 
@@ -446,7 +735,6 @@ void* glsl_make_program(const void *vertex_shader, const void *fragment_shader)
 	result->attach(*(gl::glsl::shader*)fragment_shader);
 
 	result->link();
-	result->validate();
 
 	return result;
 }

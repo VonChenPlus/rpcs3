@@ -229,7 +229,7 @@ extern std::string ppu_get_syscall_name(u64 code)
 	case 353: return "sys_memory_get_user_memory_stat";
 	case 356: return "sys_memory_allocate_colored";
 	case 361: return "sys_memory_allocate_from_container_colored";
-	case 362: return "sys_mmapper_allocate_memory_from_container";
+	case 362: return "sys_mmapper_allocate_shared_memory_from_container";
 	case 367: return "sys_uart_initialize";
 	case 368: return "sys_uart_receive";
 	case 369: return "sys_uart_send";
@@ -2361,9 +2361,9 @@ s32 ppu_error_code::report(s32 error, const char* text)
 	{
 		if (thread->type == cpu_type::ppu)
 		{
-			if (auto func = static_cast<PPUThread*>(thread)->last_function)
+			if (auto func = static_cast<ppu_thread*>(thread)->last_function)
 			{
-				LOG_ERROR(PPU, "Function '%s' failed with 0x%08x : %s", func, error, text);
+				LOG_ERROR(PPU, "'%s' failed with 0x%08x : %s", func, error, text);
 			}
 			else
 			{
@@ -2383,7 +2383,7 @@ std::vector<ppu_function_t>& ppu_function_manager::access()
 	static std::vector<ppu_function_t> list
 	{
 		nullptr,
-		[](PPUThread& ppu) { ppu.state += cpu_state::ret; },
+		[](ppu_thread& ppu) { ppu.state += cpu_state::ret; },
 	};
 
 	return list;

@@ -24,6 +24,8 @@
 
 #include "wait_engine.h"
 
+#include <mutex>
+
 namespace vm
 {
 	thread_local u64 g_tls_fault_count{};
@@ -482,40 +484,40 @@ namespace vm
 		return true;
 	}
 
-	u32 alloc(u32 size, memory_location_t location, u32 align)
+	u32 alloc(u32 size, memory_location_t location, u32 align, u32 sup)
 	{
 		const auto block = get(location);
 
 		if (!block)
 		{
-			throw EXCEPTION("Invalid memory location (%d)", location);
+			throw fmt::exception("Invalid memory location (%u)" HERE, (uint)location);
 		}
 
-		return block->alloc(size, align);
+		return block->alloc(size, align, sup);
 	}
 
-	u32 falloc(u32 addr, u32 size, memory_location_t location)
+	u32 falloc(u32 addr, u32 size, memory_location_t location, u32 sup)
 	{
 		const auto block = get(location, addr);
 
 		if (!block)
 		{
-			throw EXCEPTION("Invalid memory location (%d, addr=0x%x)", location, addr);
+			throw fmt::exception("Invalid memory location (%u, addr=0x%x)" HERE, (uint)location, addr);
 		}
 
-		return block->falloc(addr, size);
+		return block->falloc(addr, size, sup);
 	}
 
-	bool dealloc(u32 addr, memory_location_t location)
+	u32 dealloc(u32 addr, memory_location_t location, u32* sup_out)
 	{
 		const auto block = get(location, addr);
 
 		if (!block)
 		{
-			throw EXCEPTION("Invalid memory location (%d, addr=0x%x)", location, addr);
+			throw fmt::exception("Invalid memory location (%u, addr=0x%x)" HERE, (uint)location, addr);
 		}
 
-		return block->dealloc(addr);
+		return block->dealloc(addr, sup_out);
 	}
 
 	void dealloc_verbose_nothrow(u32 addr, memory_location_t location) noexcept
@@ -524,7 +526,7 @@ namespace vm
 
 		if (!block)
 		{
-			LOG_ERROR(MEMORY, "vm::dealloc(): invalid memory location (%d, addr=0x%x)\n", location, addr);
+			LOG_ERROR(MEMORY, "vm::dealloc(): invalid memory location (%u, addr=0x%x)\n", (uint)location, addr);
 			return;
 		}
 
@@ -535,9 +537,9 @@ namespace vm
 		}
 	}
 
-	bool block_t::try_alloc(u32 addr, u32 size)
+	bool block_t::try_alloc(u32 addr, u32 size, u32 sup)
 	{
-		// check if memory area is already mapped
+		// Check if memory area is already mapped
 		for (u32 i = addr / 4096; i <= (addr + size - 1) / 4096; i++)
 		{
 			if (g_pages[i])
@@ -546,86 +548,70 @@ namespace vm
 			}
 		}
 
-		// try to reserve "physical" memory
-		if (!used.atomic_op([=](u32& used) -> bool
-		{
-			if (used > this->size)
-			{
-				throw EXCEPTION("Unexpected memory amount used (0x%x)", used);
-			}
-
-			if (used + size > this->size)
-			{
-				return false;
-			}
-
-			used += size;
-
-			return true;
-		}))
-		{
-			return false;
-		}
-
-		// map memory pages
+		// Map "real" memory pages
 		_page_map(addr, size, page_readable | page_writable);
 
-		// add entry
+		// Add entry
 		m_map[addr] = size;
 
+		// Add supplementary info if necessary
+		if (sup) m_sup[addr] = sup;
+
 		return true;
+	}
+
+	block_t::block_t(u32 addr, u32 size, u64 flags)
+		: addr(addr)
+		, size(size)
+		, flags(flags)
+	{
 	}
 
 	block_t::~block_t()
 	{
 		std::lock_guard<reservation_mutex_t> lock(g_reservation_mutex);
 
-		// deallocate all memory
+		// Deallocate all memory
 		for (auto& entry : m_map)
 		{
 			_page_unmap(entry.first, entry.second);
 		}
 	}
 
-	u32 block_t::alloc(u32 size, u32 align)
+	u32 block_t::alloc(u32 size, u32 align, u32 sup)
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		std::lock_guard<reservation_mutex_t> lock(g_reservation_mutex);
 
-		// align to minimal page size
+		// Align to minimal page size
 		size = ::align(size, 4096);
 
-		// check alignment (it's page allocation, so passing small values there is just silly)
+		// Check alignment (it's page allocation, so passing small values there is just silly)
 		if (align < 4096 || align != (0x80000000u >> cntlz32(align)))
 		{
 			throw EXCEPTION("Invalid alignment (size=0x%x, align=0x%x)", size, align);
 		}
 
-		// return if size is invalid
+		// Return if size is invalid
 		if (!size || size > this->size)
 		{
 			return 0;
 		}
 
-		// search for an appropriate place (unoptimized)
+		// Search for an appropriate place (unoptimized)
 		for (u32 addr = ::align(this->addr, align); addr < this->addr + this->size - 1; addr += align)
 		{
-			if (try_alloc(addr, size))
+			if (try_alloc(addr, size, sup))
 			{
 				return addr;
-			}
-
-			if (used + size > this->size)
-			{
-				return 0;
 			}
 		}
 
 		return 0;
 	}
 
-	u32 block_t::falloc(u32 addr, u32 size)
+	u32 block_t::falloc(u32 addr, u32 size, u32 sup)
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		std::lock_guard<reservation_mutex_t> lock(g_reservation_mutex);
 
 		// align to minimal page size
 		size = ::align(size, 4096);
@@ -636,7 +622,7 @@ namespace vm
 			return 0;
 		}
 
-		if (!try_alloc(addr, size))
+		if (!try_alloc(addr, size, sup))
 		{
 			return 0;
 		}
@@ -644,9 +630,9 @@ namespace vm
 		return addr;
 	}
 
-	bool block_t::dealloc(u32 addr)
+	u32 block_t::dealloc(u32 addr, u32* sup_out)
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		std::lock_guard<reservation_mutex_t> lock(g_reservation_mutex);
 
 		const auto found = m_map.find(addr);
 
@@ -654,19 +640,36 @@ namespace vm
 		{
 			const u32 size = found->second;
 
-			// remove entry
+			// Remove entry
 			m_map.erase(found);
 
-			// return "physical" memory
-			used -= size;
+			// Unmap "real" memory pages
+			_page_unmap(addr, size);
 
-			// unmap memory pages
-			std::lock_guard<reservation_mutex_t>{ g_reservation_mutex }, _page_unmap(addr, size);
+			// Write supplementary info if necessary
+			if (sup_out) *sup_out = m_sup[addr];
 
-			return true;
+			// Remove supplementary info
+			m_sup.erase(addr);
+
+			return size;
 		}
 
-		return false;
+		return 0;
+	}
+
+	u32 block_t::used()
+	{
+		std::lock_guard<reservation_mutex_t> lock(g_reservation_mutex);
+
+		u32 result = 0;
+
+		for (auto& entry : m_map)
+		{
+			result += entry.second;
+		}
+
+		return result;
 	}
 
 	std::shared_ptr<block_t> map(u32 addr, u32 size, u64 flags)
@@ -706,7 +709,7 @@ namespace vm
 		return block;
 	}
 
-	std::shared_ptr<block_t> unmap(u32 addr)
+	std::shared_ptr<block_t> unmap(u32 addr, bool must_be_empty)
 	{
 		std::lock_guard<reservation_mutex_t> lock(g_reservation_mutex);
 
@@ -714,6 +717,11 @@ namespace vm
 		{
 			if (*it && (*it)->addr == addr)
 			{
+				if (must_be_empty && (!it->unique() || (*it)->used()))
+				{
+					return *it;
+				}
+
 				auto block = std::move(*it);
 				g_locations.erase(it);
 				return block;
@@ -815,19 +823,19 @@ namespace vm
 		{
 		case cpu_type::ppu:
 		{
-			PPUThread& context = static_cast<PPUThread&>(*cpu);
+			ppu_thread& context = static_cast<ppu_thread&>(*cpu);
 
-			const u32 old_pos = vm::cast(context.GPR[1], HERE);
-			context.GPR[1] -= align(size + 4, 8); // room minimal possible size
-			context.GPR[1] &= ~(align_v - 1); // fix stack alignment
+			const u32 old_pos = vm::cast(context.gpr[1], HERE);
+			context.gpr[1] -= align(size + 4, 8); // room minimal possible size
+			context.gpr[1] &= ~(align_v - 1); // fix stack alignment
 
-			if (context.GPR[1] < context.stack_addr)
+			if (context.gpr[1] < context.stack_addr)
 			{
 				throw EXCEPTION("Stack overflow (size=0x%x, align=0x%x, SP=0x%llx, stack=*0x%x)", size, align_v, old_pos, context.stack_addr);
 			}
 			else
 			{
-				const u32 addr = static_cast<u32>(context.GPR[1]);
+				const u32 addr = static_cast<u32>(context.gpr[1]);
 				vm::ps3::_ref<nse_t<u32>>(addr + size) = old_pos;
 				std::memset(vm::base(addr), 0, size);
 				return addr;
@@ -888,15 +896,15 @@ namespace vm
 		{
 		case cpu_type::ppu:
 		{
-			PPUThread& context = static_cast<PPUThread&>(*cpu);
+			ppu_thread& context = static_cast<ppu_thread&>(*cpu);
 
-			if (context.GPR[1] != addr)
+			if (context.gpr[1] != addr)
 			{
-				LOG_ERROR(MEMORY, "Stack inconsistency (addr=0x%x, SP=0x%llx, size=0x%x)", addr, context.GPR[1], size);
+				LOG_ERROR(MEMORY, "Stack inconsistency (addr=0x%x, SP=0x%llx, size=0x%x)", addr, context.gpr[1], size);
 				return;
 			}
 
-			context.GPR[1] = vm::ps3::_ref<nse_t<u32>>(context.GPR[1] + size);
+			context.gpr[1] = vm::ps3::_ref<nse_t<u32>>(context.gpr[1] + size);
 			return;
 		}
 

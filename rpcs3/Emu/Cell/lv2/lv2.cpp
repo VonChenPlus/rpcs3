@@ -333,13 +333,13 @@ std::array<ppu_function_t, 1024> g_ppu_syscall_table
 	BIND_FUNC(sys_mmapper_allocate_fixed_address),          //326 (0x146)
 	BIND_FUNC(sys_mmapper_enable_page_fault_notification),  //327 (0x147)
 	null_func,//BIND_FUNC(sys_mmapper_...)                  //328 (0x148)
-	null_func,//BIND_FUNC(sys_mmapper_free_shared_memory)   //329 (0x149)
+	BIND_FUNC(sys_mmapper_free_shared_memory),              //329 (0x149)
 	BIND_FUNC(sys_mmapper_allocate_address),                //330 (0x14A)
 	BIND_FUNC(sys_mmapper_free_address),                    //331 (0x14B)
-	null_func,//BIND_FUNC(sys_mmapper_allocate_shared_memory)//332(0x14C)
+	BIND_FUNC(sys_mmapper_allocate_shared_memory),          //332 (0x14C)
 	null_func,//BIND_FUNC(sys_mmapper_set_shared_memory_flag)//333(0x14D)
-	null_func,//BIND_FUNC(sys_mmapper_map_shared_memory)    //334 (0x14E)
-	null_func,//BIND_FUNC(sys_mmapper_unmap_shared_memory)  //335 (0x14F)
+	BIND_FUNC(sys_mmapper_map_shared_memory),               //334 (0x14E)
+	BIND_FUNC(sys_mmapper_unmap_shared_memory),             //335 (0x14F)
 	BIND_FUNC(sys_mmapper_change_address_access_right),     //336 (0x150)
 	BIND_FUNC(sys_mmapper_search_and_map),                  //337 (0x151)
 	null_func,//BIND_FUNC(sys_mmapper_get_shared_memory_attribute) //338 (0x152)
@@ -366,7 +366,7 @@ std::array<ppu_function_t, 1024> g_ppu_syscall_table
 	null_func,//BIND_FUNC(sys_memory_...)                   //359 (0x167)
 	null_func,//BIND_FUNC(sys_memory_...)                   //360 (0x168)
 	null_func,//BIND_FUNC(sys_memory_allocate_from_container_colored) //361 (0x169)
-	null_func,//BIND_FUNC(sys_mmapper_allocate_memory_from_container) //362 (0x16A)
+	BIND_FUNC(sys_mmapper_allocate_shared_memory_from_container),//362 (0x16A)
 	null_func,//BIND_FUNC(sys_mmapper_...)                  //363 (0x16B)
 	null_func,//BIND_FUNC(sys_mmapper_...)                  //364 (0x16C)
 	null_func,                                              //365 (0x16D)  UNS
@@ -908,42 +908,38 @@ std::array<ppu_function_t, 1024> g_ppu_syscall_table
 	null_func, null_func, null_func, null_func,             //1023  UNS
 };
 
-extern void ppu_execute_syscall(PPUThread& ppu, u64 code)
+extern void ppu_execute_syscall(ppu_thread& ppu, u64 code)
 {
-	if (code >= g_ppu_syscall_table.size())
+	if (code < g_ppu_syscall_table.size())
 	{
-		throw fmt::exception("Invalid syscall number (%llu)", code);
-	}
+		// If autopause occures, check_status() will hold the thread till unpaused.
+		if (debug::autopause::pause_syscall(code) && ppu.check_state()) throw cpu_state::ret;
 
-	// If autopause occures, check_status() will hold the thread till unpaused.
-	if (debug::autopause::pause_syscall(code) && ppu.check_status())
-	{
-		throw cpu_state::ret;
-	}
-
-	const auto previous_function = ppu.last_function; // TODO: use gsl::finally or something
-	
-	try
-	{
 		if (auto func = g_ppu_syscall_table[code])
 		{
 			func(ppu);
+			LOG_TRACE(PPU, "Syscall '%s' (%llu) finished, r3=0x%llx", ppu_get_syscall_name(code), code, ppu.gpr[3]);
 		}
 		else
 		{
 			LOG_TODO(HLE, "Unimplemented syscall %s -> CELL_OK", ppu_get_syscall_name(code));
-			ppu.GPR[3] = 0;
+			ppu.gpr[3] = 0;
 		}
-	}
-	catch (...)
-	{
-		logs::PPU.format(Emu.IsStopped() ? logs::level::warning : logs::level::error, "Syscall '%s' (%llu) aborted", ppu_get_syscall_name(code), code);
-		ppu.last_function = previous_function;
-		throw;
+
+		return;
 	}
 
-	LOG_TRACE(PPU, "Syscall '%s' (%llu) finished, r3=0x%llx", ppu_get_syscall_name(code), code, ppu.GPR[3]);
-	ppu.last_function = previous_function;
+	throw fmt::exception("Invalid syscall number (%llu)", code);
+}
+
+extern ppu_function_t ppu_get_syscall(u64 code)
+{
+	if (code < g_ppu_syscall_table.size())
+	{
+		return g_ppu_syscall_table[code];
+	}
+
+	return nullptr;
 }
 
 DECLARE(lv2_lock_t::mutex);

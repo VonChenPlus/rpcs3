@@ -1,148 +1,98 @@
 #ifdef _WIN32
+
 #include "Utilities/Log.h"
 #include "Utilities/StrFmt.h"
-#include "Utilities/Config.h"
-#include "Emu/System.h"
 
 #include "XAudio2Thread.h"
-
-extern cfg::bool_entry g_cfg_audio_convert_to_u16;
+#include <Windows.h>
 
 XAudio2Thread::XAudio2Thread()
-	: m_xaudio2_instance(nullptr)
-	, m_master_voice(nullptr)
-	, m_source_voice(nullptr)
 {
-	HRESULT hr = S_OK;
-
-	hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-	if (FAILED(hr))
+	if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL))
 	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : CoInitializeEx() failed(0x%08x)", (u32)hr);
-		Emu.Pause();
+		LOG_ERROR(GENERAL, "XAudio: failed to increase thread priority");
+	}
+
+	if (auto lib2_7 = LoadLibraryExW(L"XAudio2_7.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+	{
+		xa27_init(lib2_7);
+
+		m_funcs.destroy = &xa27_destroy;
+		m_funcs.play    = &xa27_play;
+		m_funcs.flush   = &xa27_flush;
+		m_funcs.stop    = &xa27_stop;
+		m_funcs.open    = &xa27_open;
+		m_funcs.add     = &xa27_add;
+
+		LOG_SUCCESS(GENERAL, "XAudio 2.7 initialized");
+		return;
+	}
+	
+	if (auto lib2_9 = LoadLibraryExW(L"XAudio2_9.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+	{
+		// xa28* implementation is fully compatible with library 2.9
+		xa28_init(lib2_9);
+
+		m_funcs.destroy = &xa28_destroy;
+		m_funcs.play    = &xa28_play;
+		m_funcs.flush   = &xa28_flush;
+		m_funcs.stop    = &xa28_stop;
+		m_funcs.open    = &xa28_open;
+		m_funcs.add     = &xa28_add;
+
+		LOG_SUCCESS(GENERAL, "XAudio 2.9 initialized");
 		return;
 	}
 
-	hr = XAudio2Create(&m_xaudio2_instance, 0, XAUDIO2_DEFAULT_PROCESSOR);
-	if (FAILED(hr))
+	if (auto lib2_8 = LoadLibraryExW(L"XAudio2_8.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
 	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : XAudio2Create() failed(0x%08x)", (u32)hr);
-		Emu.Pause();
+		xa28_init(lib2_8);
+
+		m_funcs.destroy = &xa28_destroy;
+		m_funcs.play    = &xa28_play;
+		m_funcs.flush   = &xa28_flush;
+		m_funcs.stop    = &xa28_stop;
+		m_funcs.open    = &xa28_open;
+		m_funcs.add     = &xa28_add;
+
+		LOG_SUCCESS(GENERAL, "XAudio 2.8 initialized");
 		return;
 	}
 
-	hr = m_xaudio2_instance->CreateMasteringVoice(&m_master_voice);
-	if (FAILED(hr))
-	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : CreateMasteringVoice() failed(0x%08x)", (u32)hr);
-		m_xaudio2_instance->Release();
-		Emu.Pause();
-	}
+	throw fmt::exception("No supported XAudio2 library found");
 }
 
 XAudio2Thread::~XAudio2Thread()
 {
-	if (m_source_voice != nullptr)
-	{
-		m_source_voice->Stop();
-		m_source_voice->DestroyVoice();
-	}
-
-	if (m_master_voice != nullptr)
-	{
-		m_master_voice->DestroyVoice();
-	}
-
-	if (m_xaudio2_instance != nullptr)
-	{
-		m_xaudio2_instance->StopEngine();
-		m_xaudio2_instance->Release();
-	}
-
-	CoUninitialize();
+	m_funcs.destroy();
 }
 
 void XAudio2Thread::Play()
 {
-	HRESULT hr = m_source_voice->Start();
-	if (FAILED(hr))
-	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : Start() failed(0x%08x)", (u32)hr);
-		Emu.Pause();
-	}
+	m_funcs.play();
 }
 
 void XAudio2Thread::Close()
 {
-	Stop();
-	HRESULT hr = m_source_voice->FlushSourceBuffers();
-	if (FAILED(hr))
-	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : FlushSourceBuffers() failed(0x%08x)", (u32)hr);
-		Emu.Pause();
-	}
+	m_funcs.stop();
+	m_funcs.flush();
 }
 
 void XAudio2Thread::Stop()
 {
-	HRESULT hr = m_source_voice->Stop();
-	if (FAILED(hr))
-	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : Stop() failed(0x%08x)", (u32)hr);
-		Emu.Pause();
-	}
+	m_funcs.stop();
 }
 
 void XAudio2Thread::Open(const void* src, int size)
 {
-	HRESULT hr;
-
-	WORD sample_size = g_cfg_audio_convert_to_u16 ? sizeof(u16) : sizeof(float);
-	WORD channels = 8;
-
-	WAVEFORMATEX waveformatex;
-	waveformatex.wFormatTag = g_cfg_audio_convert_to_u16 ? WAVE_FORMAT_PCM : WAVE_FORMAT_IEEE_FLOAT;
-	waveformatex.nChannels = channels;
-	waveformatex.nSamplesPerSec = 48000;
-	waveformatex.nAvgBytesPerSec = 48000 * (DWORD)channels * (DWORD)sample_size;
-	waveformatex.nBlockAlign = channels * sample_size;
-	waveformatex.wBitsPerSample = sample_size * 8;
-	waveformatex.cbSize = 0;
-
-	hr = m_xaudio2_instance->CreateSourceVoice(&m_source_voice, &waveformatex, 0, XAUDIO2_DEFAULT_FREQ_RATIO);
-	if (FAILED(hr))
-	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : CreateSourceVoice() failed(0x%08x)", (u32)hr);
-		Emu.Pause();
-		return;
-	}
-
-	m_source_voice->SetVolume(4.0);
-
-	AddData(src, size);
-	Play();
+	m_funcs.open();
+	m_funcs.add(src, size);
+	m_funcs.play();
 }
 
 void XAudio2Thread::AddData(const void* src, int size)
 {
-	XAUDIO2_BUFFER buffer;
-
-	buffer.AudioBytes = size;
-	buffer.Flags = 0;
-	buffer.LoopBegin = XAUDIO2_NO_LOOP_REGION;
-	buffer.LoopCount = 0;
-	buffer.LoopLength = 0;
-	buffer.pAudioData = (const BYTE*)src;
-	buffer.pContext = 0;
-	buffer.PlayBegin = 0;
-	buffer.PlayLength = 256;
-
-	HRESULT hr = m_source_voice->SubmitSourceBuffer(&buffer);
-	if (FAILED(hr))
-	{
-		LOG_ERROR(GENERAL, "XAudio2Thread : AddData() failed(0x%08x)", (u32)hr);
-		Emu.Pause();
-	}
+	m_funcs.add(src, size);
 }
 
 #endif

@@ -2,7 +2,6 @@
 #include "stdafx_gui.h"
 #include "rpcs3.h"
 #include "MainFrame.h"
-#include "rpcs3_version.h"
 
 #include "Emu/Memory/Memory.h"
 #include "Emu/System.h"
@@ -20,6 +19,9 @@
 #include "Crypto/unpkg.h"
 
 #include "Utilities/Thread.h"
+#include "Utilities/StrUtil.h"
+
+#include "../Crypto/unself.h"
 
 #include <thread>
 
@@ -52,6 +54,7 @@ enum IDs
 	id_tools_memory_viewer,
 	id_tools_rsx_debugger,
 	id_tools_string_search,
+	id_tools_decrypt_sprx_libraries,
 	id_tools_cg_disasm,
 	id_help_about,
 	id_update_dbg
@@ -69,7 +72,7 @@ MainFrame::MainFrame()
 	, m_sys_menu_opened(false)
 {
 
-	SetLabel(std::string(_PRGNAME_ " v") + rpcs3::version.to_string());
+	SetLabel("RPCS3 v" + rpcs3::version.to_string());
 
 	wxMenuBar* menubar = new wxMenuBar();
 
@@ -109,6 +112,8 @@ MainFrame::MainFrame()
 	menu_tools->Append(id_tools_memory_viewer, "&Memory Viewer")->Enable(false);
 	menu_tools->Append(id_tools_rsx_debugger, "&RSX Debugger")->Enable(false);
 	menu_tools->Append(id_tools_string_search, "&String Search")->Enable(false);
+	menu_tools->AppendSeparator();
+	menu_tools->Append(id_tools_decrypt_sprx_libraries, "&Decrypt SPRX libraries");
 
 	wxMenu* menu_help = new wxMenu();
 	menubar->Append(menu_help, "&Help");
@@ -143,6 +148,7 @@ MainFrame::MainFrame()
 	Bind(wxEVT_MENU, &MainFrame::ConfigVFS, this, id_config_vfs_manager);
 	Bind(wxEVT_MENU, &MainFrame::ConfigVHDD, this, id_config_vhdd_manager);
 	Bind(wxEVT_MENU, &MainFrame::ConfigSaveData, this, id_config_savedata_manager);
+	Bind(wxEVT_MENU, &MainFrame::DecryptSPRXLibraries, this, id_tools_decrypt_sprx_libraries);
 
 	Bind(wxEVT_MENU, &MainFrame::OpenELFCompiler, this, id_tools_compiler);
 	Bind(wxEVT_MENU, &MainFrame::OpenKernelExplorer, this, id_tools_kernel_explorer);
@@ -157,9 +163,6 @@ MainFrame::MainFrame()
 
 	wxGetApp().Bind(wxEVT_KEY_DOWN, &MainFrame::OnKeyDown, this);
 	wxGetApp().Bind(wxEVT_DBG_COMMAND, &MainFrame::UpdateUI, this);
-
-	LOG_NOTICE(GENERAL, "%s", (std::string(_PRGNAME_ " v") + rpcs3::version.to_string()).c_str());
-	LOG_NOTICE(GENERAL, "");
 }
 
 MainFrame::~MainFrame()
@@ -246,7 +249,7 @@ void MainFrame::InstallPkg(wxCommandEvent& WXUNUSED(event))
 	pkg_f.seek(0);
 
 	// Get full path
-	const auto& local_path = vfs::get("/dev_hdd0/game/") + std::string(std::begin(title_id), std::end(title_id));
+	const auto& local_path = Emu.GetGameDir() + std::string(std::begin(title_id), std::end(title_id));
 
 	if (!fs::create_dir(local_path))
 	{
@@ -276,13 +279,15 @@ void MainFrame::InstallPkg(wxCommandEvent& WXUNUSED(event))
 			if (pkg_install(pkg_f, local_path + '/', progress))
 			{
 				progress = 1.;
+				return_;
 			}
 
 			// TODO: Ask user to delete files on cancellation/failure?
+			progress = -1.;
 		});
 
 		// Wait for the completion
-		while (std::this_thread::sleep_for(5ms), progress < 1.)
+		while (std::this_thread::sleep_for(5ms), std::abs(progress) < 1.)
 		{
 			// Update progress window
 			if (!pdlg.Update(static_cast<int>(progress * pdlg.GetRange())))
@@ -291,6 +296,12 @@ void MainFrame::InstallPkg(wxCommandEvent& WXUNUSED(event))
 				progress -= 1.;
 				break;
 			}
+		}
+		
+		if (progress > 0.)
+		{
+			pdlg.Update(pdlg.GetRange());
+			std::this_thread::sleep_for(100ms);
 		}
 	}
 
@@ -337,6 +348,50 @@ void MainFrame::BootElf(wxCommandEvent& WXUNUSED(event))
 	LOG_SUCCESS(LOADER, "(S)ELF: boot done.");
 }
 
+void MainFrame::DecryptSPRXLibraries(wxCommandEvent& WXUNUSED(event))
+{
+	wxFileDialog ctrl(this, L"Select SPRX files", wxEmptyString, wxEmptyString,
+		"SPRX files (*.sprx)|*sprx",
+		wxFD_OPEN | wxFD_MULTIPLE);
+
+	if (ctrl.ShowModal() == wxID_CANCEL)
+	{
+		return;
+	}
+
+	wxArrayString modules;
+	ctrl.GetPaths(modules);
+
+	LOG_NOTICE(GENERAL, "Decrypting SPRX libraries...");
+
+	for (const wxString& module : modules)
+	{
+		std::string prx_path = fmt::ToUTF8(module);
+		const std::string& prx_dir = fs::get_parent_dir(prx_path);
+
+		if (IsSelf(prx_path))
+		{
+			const std::size_t prx_ext_pos = prx_path.find_last_of('.');
+			const std::string& prx_ext = fmt::to_upper(prx_path.substr(prx_ext_pos != -1 ? prx_ext_pos : prx_path.size()));
+			const std::string& prx_name = prx_path.substr(prx_dir.size());
+
+			prx_path.erase(prx_path.size() - 4, 1); // change *.sprx to *.prx
+
+			if (DecryptSelf(prx_path, prx_dir + prx_name))
+			{
+				LOG_SUCCESS(GENERAL, "Decrypted %s", prx_dir + prx_name);
+			}
+
+			else
+			{
+				LOG_ERROR(GENERAL, "Failed to decrypt %s", prx_dir + prx_name);
+			}
+		}
+	}
+
+	LOG_NOTICE(GENERAL, "Finished decrypting all SPRX libraries.");
+}
+
 void MainFrame::Pause(wxCommandEvent& WXUNUSED(event))
 {
 	if(Emu.IsReady())
@@ -359,16 +414,16 @@ void MainFrame::Stop(wxCommandEvent& WXUNUSED(event))
 }
 
 // This is ugly, but PS3 headers shall not be included there.
-extern void sysutilSendSystemCommand(u64 status, u64 param);
+extern void sysutil_send_system_cmd(u64 status, u64 param);
 
 void MainFrame::SendExit(wxCommandEvent& event)
 {
-	sysutilSendSystemCommand(0x0101 /* CELL_SYSUTIL_REQUEST_EXITGAME */, 0);
+	sysutil_send_system_cmd(0x0101 /* CELL_SYSUTIL_REQUEST_EXITGAME */, 0);
 }
 
 void MainFrame::SendOpenCloseSysMenu(wxCommandEvent& event)
 {
-	sysutilSendSystemCommand(m_sys_menu_opened ? 0x0132 /* CELL_SYSUTIL_SYSTEM_MENU_CLOSE */ : 0x0131 /* CELL_SYSUTIL_SYSTEM_MENU_OPEN */, 0);
+	sysutil_send_system_cmd(m_sys_menu_opened ? 0x0132 /* CELL_SYSUTIL_SYSTEM_MENU_CLOSE */ : 0x0131 /* CELL_SYSUTIL_SYSTEM_MENU_OPEN */, 0);
 	m_sys_menu_opened = !m_sys_menu_opened;
 	wxCommandEvent ce;
 	UpdateUI(ce);

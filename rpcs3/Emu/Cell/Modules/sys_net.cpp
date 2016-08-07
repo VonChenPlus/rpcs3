@@ -8,6 +8,7 @@
 #include <winsock2.h>
 #include <WS2tcpip.h>
 #else
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -146,7 +147,7 @@ namespace sys_net
 	// TODO
 	thread_local vm::ptr<_tls_data_t> g_tls_net_data{};
 
-	static never_inline void initialize_tls()
+	static NEVER_INLINE void initialize_tls()
 	{
 		// allocate if not initialized
 		if (!g_tls_net_data)
@@ -193,7 +194,7 @@ namespace sys_net
 #endif
 		{
 			ERROR_CASE(EWOULDBLOCK);
-		default: throw fmt::exception("Unknown/illegal socket error: %d" HERE, code);
+		default: libnet.error("Unknown/illegal socket error: %d" HERE, code);
 		}
 
 		if (name && result != SYS_NET_EWOULDBLOCK)
@@ -550,8 +551,18 @@ namespace sys_net
 				ret = ::setsockopt(sock->s, SOL_SOCKET, SO_RCVLOWAT, (char*)&recvlowmark, sizeof(recvlowmark));
 				break;
 			}
+			case  OP_SO_USECRYPTO:
+			{
+				libnet.warning("Socket option OP_SO_USECRYPTO is unimplemented");
+				break;
+			}
+			case  OP_SO_USESIGNATURE:
+			{
+				libnet.warning("Socket option OP_SO_USESIGNATURE is unimplemented");
+				break;
+			}
 			default:
-				throw EXCEPTION("Unknown socket option for Win32: 0x%x", optname);
+				libnet.error("Unknown socket option for Win32: 0x%x", optname);
 			}
 		}
 		else if (level == PROTO_IPPROTO_TCP)
@@ -572,7 +583,7 @@ namespace sys_net
 			}
 
 			default:
-				throw EXCEPTION("Unknown TCP option for Win32: 0x%x", optname);
+				libnet.error("Unknown TCP option for Win32: 0x%x", optname);
 			}
 		}
 #else
@@ -599,7 +610,7 @@ namespace sys_net
 			}
 
 			default:
-				throw EXCEPTION("Unknown socket option for Unix: 0x%x", optname);
+				libnet.error("Unknown socket option for Unix: 0x%x", optname);
 			}
 		}
 		else if (level == PROTO_IPPROTO_TCP)
@@ -621,7 +632,7 @@ namespace sys_net
 			}
 
 			default:
-				throw EXCEPTION("Unknown TCP option for Unix: 0x%x", optname);
+				libnet.error("Unknown TCP option for Unix: 0x%x", optname);
 			}
 		}
 #endif

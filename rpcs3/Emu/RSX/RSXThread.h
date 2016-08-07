@@ -9,40 +9,19 @@
 #include "RSXTexture.h"
 #include "RSXVertexProgram.h"
 #include "RSXFragmentProgram.h"
+#include "rsx_methods.h"
+#include "rsx_trace.h"
+#include <Utilities/GSL.h>
 
 #include "Utilities/Thread.h"
 #include "Utilities/Timer.h"
 #include "Utilities/geometry.h"
+#include "rsx_trace.h"
 
 extern u64 get_system_time();
 
-struct frame_capture_data
-{
-	struct draw_state
-	{
-		std::string name;
-		std::pair<std::string, std::string> programs;
-		size_t width = 0, height = 0;
-		rsx::surface_color_format color_format;
-		std::array<std::vector<gsl::byte>, 4> color_buffer;
-		rsx::surface_depth_format depth_format;
-		std::array<std::vector<gsl::byte>, 2> depth_stencil;
-		rsx::index_array_type index_type;
-		std::vector<gsl::byte> index;
-		u32 vertex_count;
-	};
-	std::vector<std::pair<u32, u32> > command_queue;
-	std::vector<draw_state> draw_calls;
-
-	void reset()
-	{
-		command_queue.clear();
-		draw_calls.clear();
-	}
-};
-
 extern bool user_asked_for_frame_capture;
-extern frame_capture_data frame_debug;
+extern rsx::frame_capture_data frame_debug;
 
 namespace rsx
 {
@@ -56,28 +35,13 @@ namespace rsx
 	}
 }
 
-template<>
-struct unveil<rsx::old_shaders_cache::shader_language>
-{
-	static inline const char* get(rsx::old_shaders_cache::shader_language in)
-	{
-		switch (in)
-		{
-		case rsx::old_shaders_cache::shader_language::glsl: return "glsl";
-		case rsx::old_shaders_cache::shader_language::hlsl: return "hlsl";
-		}
-
-		return "";
-	}
-};
-
 namespace rsx
 {
 	namespace limits
 	{
 		enum
 		{
-			textures_count = 16,
+			fragment_textures_count = 16,
 			vertex_textures_count = 4,
 			vertex_count = 16,
 			fragment_count = 32,
@@ -179,31 +143,10 @@ namespace rsx
 		}
 	};
 
-	struct data_array_format_info
-	{
-		u16 frequency = 0;
-		u8 stride = 0;
-		u8 size = 0;
-		vertex_base_type type = vertex_base_type::f;
-
-		void unpack_array(u32 data_array_format)
-		{
-			frequency = data_array_format >> 16;
-			stride = (data_array_format >> 8) & 0xff;
-			size = (data_array_format >> 4) & 0xf;
-			type = to_vertex_base_type(data_array_format & 0xf);
-		}
-	};
-
-	enum class draw_command
-	{
-		array,
-		inlined_array,
-		indexed,
-	};
-
 	class thread : public named_thread
 	{
+		std::shared_ptr<thread_ctrl> m_vblank_thread;
+
 	protected:
 		std::stack<u32> m_call_stack;
 
@@ -218,47 +161,17 @@ namespace rsx
 		GcmTileInfo tiles[limits::tiles_count];
 		GcmZcullInfo zculls[limits::zculls_count];
 
-		rsx::texture textures[limits::textures_count];
-		rsx::vertex_texture vertex_textures[limits::vertex_textures_count];
-
-
-		/**
-		 * RSX can sources vertex attributes from 2 places:
-		 * - Immediate values passed by NV4097_SET_VERTEX_DATA*_M + ARRAY_ID write.
-		 * For a given ARRAY_ID the last command of this type defines the actual type of the immediate value.
-		 * Since there can be only a single value per ARRAY_ID passed this way, all vertex in the draw call
-		 * shares it.
-		 * - Vertex array values passed by offset/stride/size/format description.
-		 *
-		 * A given ARRAY_ID can have both an immediate value and a vertex array enabled at the same time
-		 * (See After Burner Climax intro cutscene). In such case the vertex array has precedence over the
-		 * immediate value. As soon as the vertex array is disabled (size set to 0) the immediate value
-		 * must be used if the vertex attrib mask request it.
-		 *
-		 * Note that behavior when both vertex array and immediate value system are disabled but vertex attrib mask
-		 * request inputs is unknow.
-		 */
-		data_array_format_info register_vertex_info[limits::vertex_count];
-		std::vector<u8> register_vertex_data[limits::vertex_count];
-		data_array_format_info vertex_arrays_info[limits::vertex_count];
 		u32 vertex_draw_count = 0;
-
-		std::unordered_map<u32, color4_base<f32>> transform_constants;
-
-		/**
-		* Stores the first and count argument from draw/draw indexed parameters between begin/end clauses.
-		*/
-		std::vector<std::pair<u32, u32> > first_count_commands;
 
 		// Constant stored for whole frame
 		std::unordered_map<u32, color4f> local_transform_constants;
-
-		u32 transform_program[512 * 4] = {};
 
 		bool capture_current_frame = false;
 		void capture_frame(const std::string &name);
 
 	public:
+		std::shared_ptr<class ppu_thread> intr_thread;
+
 		u32 ioAddress, ioSize;
 		int flip_status;
 		int flip_mode;
@@ -267,13 +180,11 @@ namespace rsx
 
 		u32 tiles_addr;
 		u32 zculls_addr;
-		vm::ps3::ptr<CellGcmDisplayInfo> gcm_buffers;
+		vm::ps3::ptr<CellGcmDisplayInfo> gcm_buffers = vm::null;
 		u32 gcm_buffers_count;
 		u32 gcm_current_buffer;
 		u32 ctxt_addr;
 		u32 label_addr;
-		rsx::draw_command draw_command;
-		primitive_type draw_mode;
 
 		u32 local_mem_addr, main_mem_addr;
 		bool strict_ordering[0x1000];
@@ -309,11 +220,12 @@ namespace rsx
 		virtual ~thread();
 
 		virtual void on_task() override;
+		virtual void on_exit() override;
 
 	public:
 		virtual std::string get_name() const override;
 
-		virtual void on_init() override {} // disable start() (TODO)
+		virtual void on_init(const std::shared_ptr<void>&) override {} // disable start() (TODO)
 		virtual void on_stop() override {} // disable join()
 
 		virtual void begin();
@@ -325,6 +237,8 @@ namespace rsx
 		virtual void flip(int buffer) = 0;
 		virtual u64 timestamp() const;
 		virtual bool on_access_violation(u32 address, bool is_writing) { return false; }
+
+		gsl::span<const gsl::byte> get_raw_index_array(const std::vector<std::pair<u32, u32> >& draw_indexed_clause) const;
 
 	private:
 		std::mutex m_mtx_task;

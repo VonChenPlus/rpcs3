@@ -370,13 +370,13 @@ void RSXDebugger::OnClickBuffer(wxMouseEvent& event)
 	if (event.GetId() == p_buffer_stencil->GetId()) display_buffer(this, stencil_img);
 	if (event.GetId() == p_buffer_tex->GetId())
 	{
-		u8 location = render->textures[m_cur_texture].location();
+/*		u8 location = render->textures[m_cur_texture].location();
 		if(location <= 1 && vm::check_addr(rsx::get_address(render->textures[m_cur_texture].offset(), location))
 			&& render->textures[m_cur_texture].width() && render->textures[m_cur_texture].height())
 			MemoryViewerPanel::ShowImage(this,
 				rsx::get_address(render->textures[m_cur_texture].offset(), location), 1,
 				render->textures[m_cur_texture].width(),
-				render->textures[m_cur_texture].height(), false);
+				render->textures[m_cur_texture].height(), false);*/
 	}
 
 #undef SHOW_BUFFER
@@ -471,14 +471,14 @@ void RSXDebugger::OnClickDrawCalls(wxMouseEvent& event)
 		p_buffer_colorD,
 	};
 
-	size_t width = draw_call.width;
-	size_t height = draw_call.height;
+	size_t width = draw_call.state.surface_clip_width();
+	size_t height = draw_call.state.surface_clip_height();
 
 	for (size_t i = 0; i < 4; i++)
 	{
 		if (width && height && !draw_call.color_buffer[i].empty())
 		{
-			buffer_img[i] = wxImage(width, height, convert_to_wximage_buffer(draw_call.color_format, draw_call.color_buffer[i], width, height));
+			buffer_img[i] = wxImage(width, height, convert_to_wximage_buffer(draw_call.state.surface_color(), draw_call.color_buffer[i], width, height));
 			wxClientDC dc_canvas(p_buffers[i]);
 
 			if (buffer_img[i].IsOk())
@@ -493,7 +493,7 @@ void RSXDebugger::OnClickDrawCalls(wxMouseEvent& event)
 			gsl::span<const gsl::byte> orig_buffer = draw_call.depth_stencil[0];
 			unsigned char *buffer = (unsigned char *)malloc(width * height * 3);
 
-			if (draw_call.depth_format == rsx::surface_depth_format::z24s8)
+			if (draw_call.state.surface_depth_fmt() == rsx::surface_depth_format::z24s8)
 			{
 				for (u32 row = 0; row < height; row++)
 				{
@@ -564,7 +564,7 @@ void RSXDebugger::OnClickDrawCalls(wxMouseEvent& event)
 
 	m_list_index_buffer->ClearAll();
 	m_list_index_buffer->InsertColumn(0, "Index", 0, 700);
-	if (frame_debug.draw_calls[draw_id].index_type == rsx::index_array_type::u16)
+	if (frame_debug.draw_calls[draw_id].state.index_type() == rsx::index_array_type::u16)
 	{
 		u16 *index_buffer = (u16*)frame_debug.draw_calls[draw_id].index.data();
 		for (u32 i = 0; i < frame_debug.draw_calls[draw_id].vertex_count; ++i)
@@ -572,7 +572,7 @@ void RSXDebugger::OnClickDrawCalls(wxMouseEvent& event)
 			m_list_index_buffer->InsertItem(i, std::to_string(index_buffer[i]));
 		}
 	}
-	if (frame_debug.draw_calls[draw_id].index_type == rsx::index_array_type::u32)
+	if (frame_debug.draw_calls[draw_id].state.index_type() == rsx::index_array_type::u32)
 	{
 		u32 *index_buffer = (u32*)frame_debug.draw_calls[draw_id].index.data();
 		for (u32 i = 0; i < frame_debug.draw_calls[draw_id].vertex_count; ++i)
@@ -725,7 +725,7 @@ void RSXDebugger::GetBuffers()
 	}
 
 	// Draw Texture
-	if(!render->textures[m_cur_texture].enabled())
+/*	if(!render->textures[m_cur_texture].enabled())
 		return;
 
 	u32 offset = render->textures[m_cur_texture].offset();
@@ -752,7 +752,7 @@ void RSXDebugger::GetBuffers()
 
 	wxImage img(width, height, buffer);
 	wxClientDC dc_canvas(p_buffer_tex);
-	dc_canvas.DrawBitmap(img.Scale(m_text_width, m_text_height), 0, 0, false);
+	dc_canvas.DrawBitmap(img.Scale(m_text_width, m_text_height), 0, 0, false);*/
 }
 
 void RSXDebugger::GetFlags()
@@ -821,9 +821,9 @@ void RSXDebugger::GetTexture()
 
 	m_list_texture->DeleteAllItems();
 
-	for(uint i=0; i<rsx::limits::textures_count; ++i)
+	for(uint i=0; i<rsx::limits::fragment_textures_count; ++i)
 	{
-		if(render->textures[i].enabled())
+/*		if(render->textures[i].enabled())
 		{
 			m_list_texture->InsertItem(i, wxString::Format("%d", i));
 			u8 location = render->textures[i].location();
@@ -848,7 +848,7 @@ void RSXDebugger::GetTexture()
 				render->textures[i].height()));
 
 			m_list_texture->SetItemBackgroundColour(i, wxColour(m_cur_texture == i ? "Wheat" : "White"));
-		}
+		}*/
 	}
 }
 

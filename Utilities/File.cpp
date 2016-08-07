@@ -2,6 +2,8 @@
 #include "StrFmt.h"
 #include "Macro.h"
 #include "SharedMutex.h"
+#include "BEType.h"
+#include "Crypto/sha1.h"
 
 #include <unordered_map>
 #include <algorithm>
@@ -78,6 +80,8 @@ static fs::error to_error(DWORD e)
 	case ERROR_ALREADY_EXISTS: return fs::error::exist;
 	case ERROR_FILE_EXISTS: return fs::error::exist;
 	case ERROR_NEGATIVE_SEEK: return fs::error::inval;
+	case ERROR_DIRECTORY: return fs::error::inval;
+	case ERROR_INVALID_NAME: return fs::error::inval;
 	default: throw fmt::exception("Unknown Win32 error: %u.", e);
 	}
 }
@@ -623,7 +627,7 @@ void fs::file::xnull() const
 
 void fs::file::xfail() const
 {
-	throw fmt::exception("Unexpected fs::error %u", g_tls_error);
+	throw fmt::exception("Unexpected fs::error %s", g_tls_error);
 }
 
 bool fs::file::open(const std::string& path, bitset_t<open_mode> mode)
@@ -1207,7 +1211,79 @@ const std::string& fs::get_executable_dir()
 	return s_dir;
 }
 
-void fs::remove_all(const std::string& path)
+std::string fs::get_data_dir(const std::string& prefix, const std::string& location, const std::string& suffix)
+{
+	static const std::string s_dir = []
+	{
+		const std::string& dir = get_config_dir() + "/data/";
+
+		if (!is_dir(dir) && !create_path(dir))
+		{
+			return get_config_dir();
+		}
+
+		return dir;
+	}();
+
+	std::vector<u8> buf;
+	buf.reserve(location.size() + 1);
+
+	// Normalize location
+	for (char c : location)
+	{
+#ifdef _WIN32
+		if (c == '/' || c == '\\')
+#else
+		if (c == '/')
+#endif
+		{
+			if (buf.empty() || buf.back() != '/')
+			{
+				buf.push_back('/');
+			}
+
+			continue;
+		}
+		
+		buf.push_back(c);
+	}
+
+	// Calculate hash
+	u8 hash[20];
+	sha1(buf.data(), buf.size(), hash);
+
+	// Concatenate
+	std::string&& result = fmt::format("%s%s/%016llx%08x-%s/", s_dir, prefix, reinterpret_cast<be_t<u64>&>(hash[0]), reinterpret_cast<be_t<u32>&>(hash[8]), suffix);
+
+	if (!is_dir(result))
+	{
+		// Create dir if necessary
+		if (create_path(result))
+		{
+			// Acknowledge original location
+			file(result + ".location", rewrite).write(buf);
+		}
+	}
+
+	return result;
+}
+
+std::string fs::get_data_dir(const std::string& prefix, const std::string& path)
+{
+#ifdef _WIN32
+	const auto& delim = "/\\";
+#else
+	const auto& delim = "/";
+#endif
+
+	// Extract file name and location
+	const std::string& location = fs::get_parent_dir(path);
+	const std::size_t name_pos = path.find_first_not_of(delim, location.size());
+
+	return fs::get_data_dir(prefix, location, name_pos == -1 ? std::string{} : path.substr(name_pos));
+}
+
+void fs::remove_all(const std::string& path, bool remove_root)
 {
 	for (const auto& entry : dir(path))
 	{
@@ -1227,7 +1303,10 @@ void fs::remove_all(const std::string& path)
 		}
 	}
 
-	remove_dir(path);
+	if (remove_root)
+	{
+		remove_dir(path);
+	}
 }
 
 u64 fs::get_dir_size(const std::string& path)
@@ -1253,4 +1332,38 @@ u64 fs::get_dir_size(const std::string& path)
 	}
 
 	return result;
+}
+
+template<>
+void fmt_class_string<fs::seek_mode>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](auto arg)
+	{
+		switch (arg)
+		{
+		STR_CASE(fs::seek_mode::seek_set);
+		STR_CASE(fs::seek_mode::seek_cur);
+		STR_CASE(fs::seek_mode::seek_end);
+		}
+
+		return unknown;
+	});
+}
+
+template<>
+void fmt_class_string<fs::error>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](auto arg)
+	{
+		switch (arg)
+		{
+		case fs::error::ok: return "OK";
+
+		case fs::error::inval: return "Invalid arguments";
+		case fs::error::noent: return "Not found";
+		case fs::error::exist: return "Already exists";
+		}
+
+		return unknown;
+	});
 }

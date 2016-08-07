@@ -4,13 +4,35 @@
 
 #include "Emu/Audio/AudioThread.h"
 
-#include "3rdparty/XAudio2_7/XAudio2.h"
-
 class XAudio2Thread : public AudioThread
 {
-	IXAudio2* m_xaudio2_instance;
-	IXAudio2MasteringVoice* m_master_voice;
-	IXAudio2SourceVoice* m_source_voice;
+	struct vtable
+	{
+		void(*destroy)();
+		void(*play)();
+		void(*flush)();
+		void(*stop)();
+		void(*open)();
+		void(*add)(const void*, int);
+	};
+
+	vtable m_funcs;
+
+	static void xa27_init(void*);
+	static void xa27_destroy();
+	static void xa27_play();
+	static void xa27_flush();
+	static void xa27_stop();
+	static void xa27_open();
+	static void xa27_add(const void*, int);
+
+	static void xa28_init(void*);
+	static void xa28_destroy();
+	static void xa28_play();
+	static void xa28_flush();
+	static void xa28_stop();
+	static void xa28_open();
+	static void xa28_add(const void*, int);
 
 public:
 	XAudio2Thread();

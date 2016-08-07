@@ -3,23 +3,22 @@
 #include "../Utilities/Thread.h"
 #include "../Utilities/BitSet.h"
 
-// CPU Thread Type
-enum class cpu_type : u32
+// CPU Thread Type (TODO: probably remove, use id and idm to classify threads)
+enum class cpu_type : u8
 {
 	ppu, // PPU Thread
 	spu, // SPU Thread
 	arm, // ARMv7 Thread
 };
 
-// CPU Thread State flags
-enum struct cpu_state : u32
+// CPU Thread State flags (TODO: use u32 once cpu_type is removed)
+enum struct cpu_state : u16
 {
 	stop, // Thread not running (HLE, initial state)
 	exit, // Irreversible exit
 	suspend, // Thread paused
 	ret, // Callback return requested
 	signal, // Thread received a signal (HLE)
-	interrupt, // Thread interrupted
 
 	dbg_global_pause, // Emulation paused
 	dbg_global_stop, // Emulation stopped
@@ -38,41 +37,26 @@ public:
 	virtual void on_stop() override;
 	virtual ~cpu_thread() override;
 
-	const std::string name;
-	const cpu_type type;
 	const id_value<> id{};
+	const cpu_type type;
 
-	cpu_thread(cpu_type type, const std::string& name);
+	cpu_thread(cpu_type type);
 
 	// Public thread state
 	atomic_t<bitset_t<cpu_state>> state{ cpu_state::stop };
-
-	// Public recursive sleep state counter
-	atomic_t<u32> sleep_counter{};
 
 	// Object associated with sleep state, possibly synchronization primitive (mutex, semaphore, etc.)
 	atomic_t<void*> owner{};
 
 	// Process thread state, return true if the checker must return
-	bool check_status();
+	bool check_state();
 
-	// Increse sleep counter
-	void sleep()
-	{
-		if (!sleep_counter++) return; //handle_interrupt();
-	}
+	// Run thread
+	void run();
 
-	// Decrese sleep counter
-	void awake()
-	{
-		if (!--sleep_counter) owner = nullptr;
-	}
-
-	// Print CPU state
-	virtual std::string dump() const = 0;
-	virtual void cpu_init() {}
+	virtual std::string dump() const = 0; // Print CPU state
+	virtual void cpu_init() {} // Obsolete, must be removed
 	virtual void cpu_task() = 0;
-	virtual bool handle_interrupt() { return false; }
 };
 
 inline cpu_thread* get_current_cpu_thread() noexcept
@@ -81,27 +65,3 @@ inline cpu_thread* get_current_cpu_thread() noexcept
 
 	return g_tls_current_cpu_thread;
 }
-
-// Helper for cpu_thread.
-// 1) Calls sleep() and locks the thread in the constructor.
-// 2) Calls awake() and unlocks the thread in the destructor.
-class cpu_thread_lock final
-{
-	cpu_thread& m_thread;
-
-public:
-	cpu_thread_lock(const cpu_thread_lock&) = delete;
-
-	cpu_thread_lock(cpu_thread& thread)
-		: m_thread(thread)
-	{
-		m_thread.sleep();
-		m_thread->lock();
-	}
-
-	~cpu_thread_lock()
-	{
-		m_thread.awake();
-		m_thread->unlock();
-	}
-};

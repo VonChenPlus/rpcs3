@@ -12,9 +12,8 @@ extern u32 ppu_generate_id(const char* name);
 // Flags set with REG_FUNC
 enum ppu_static_function_flags : u32
 {
-	MFF_FORCED_HLE = (1 << 0), // Always call HLE function (TODO: deactivated)
-
-	MFF_PERFECT = MFF_FORCED_HLE, // Indicates that function is completely implemented and can replace LLE implementation
+	MFF_FORCED_HLE = (1 << 0), // Always call HLE function
+	MFF_PERFECT    = (1 << 1), // Indicates complete implementation and LLE interchangeability
 };
 
 // HLE function information
@@ -198,22 +197,9 @@ public:
 
 // Call specified function directly if LLE is not available, call LLE equivalent in callback style otherwise
 template<typename T, T Func, typename... Args, typename RT = std::result_of_t<T(Args...)>>
-inline RT ppu_execute_function_or_callback(const char* name, PPUThread& ppu, Args&&... args)
+inline RT ppu_execute_function_or_callback(const char* name, ppu_thread& ppu, Args&&... args)
 {
-	const auto previous_function = ppu.last_function; // TODO
-
-	try
-	{
-		return Func(std::forward<Args>(args)...);
-	}
-	catch (...)
-	{
-		LOG_ERROR(PPU, "Function call '%s' aborted", ppu.last_function);
-		ppu.last_function = previous_function;
-		throw;
-	}
-
-	ppu.last_function = previous_function;
+	return Func(std::forward<Args>(args)...);
 }
 
 #define CALL_FUNC(ppu, func, ...) ppu_execute_function_or_callback<decltype(&func), &func>(#func, ppu, __VA_ARGS__)
